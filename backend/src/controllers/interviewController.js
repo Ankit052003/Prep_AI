@@ -2,6 +2,32 @@ const Interview = require("../models/Interview");
 const { generateQuestions, evaluateAnswer } = require("../services/aiService");
 const mongoose = require("mongoose");
 
+function getRequestBody(req) {
+  const rawBody = req.body;
+
+  if (rawBody && typeof rawBody === "object" && !Array.isArray(rawBody)) {
+    return rawBody;
+  }
+
+  if (typeof rawBody === "string") {
+    const trimmedBody = rawBody.trim();
+    if (!trimmedBody) {
+      return {};
+    }
+
+    try {
+      const parsed = JSON.parse(trimmedBody);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch (_err) {
+      // Non-JSON text body. Caller-level validation will report missing fields.
+    }
+  }
+
+  return {};
+}
+
 function parseQuestionList(questionsText) {
   if (typeof questionsText !== "string") {
     return [];
@@ -26,13 +52,17 @@ function parseQuestionList(questionsText) {
 
 exports.startInterview = async (req, res) => {
   try {
-    const body = req.body || {};
-    const parsedResume = body.parsedResume ?? body.parsedData ?? body.resumeData;
+    const body = getRequestBody(req);
+    const parsedResume =
+      body.parsedResume ??
+      body.parsedData ??
+      body.resumeData ??
+      body.resumeText;
 
     if (!parsedResume) {
       return res.status(400).json({
         error:
-          "Missing resume data. Send JSON body with `parsedResume` (or `parsedData`).",
+          "Missing resume data. Send JSON body with `parsedResume` (or `parsedData` / `resumeText`).",
       });
     }
 
@@ -60,7 +90,7 @@ exports.startInterview = async (req, res) => {
 
 exports.submitAnswer = async (req, res) => {
   try {
-    const body = req.body || {};
+    const body = getRequestBody(req);
     const interviewId =
       body.interviewId ||
       body.interviewID ||
@@ -124,10 +154,18 @@ exports.submitAnswer = async (req, res) => {
 
     if (interview.currentQuestionIndex < interview.questions.length) {
       res.json({
+        question: currentQuestion,
+        answer,
+        score,
+        evaluation,
         nextQuestion: interview.questions[interview.currentQuestionIndex],
       });
     } else {
       res.json({
+        question: currentQuestion,
+        answer,
+        score,
+        evaluation,
         message: "Interview completed. Please finish interview.",
       });
     }
@@ -136,9 +174,13 @@ exports.submitAnswer = async (req, res) => {
   }
 };
 
+exports.evaluateSingleAnswer = async (req, res) => {
+  return exports.submitAnswer(req, res);
+};
+
 exports.finishInterview = async (req, res) => {
   try {
-    const { interviewId } = req.body || {};
+    const { interviewId } = getRequestBody(req);
     if (!interviewId) {
       return res.status(400).json({ error: "Missing required field: `interviewId`." });
     }

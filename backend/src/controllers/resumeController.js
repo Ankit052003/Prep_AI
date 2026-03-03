@@ -28,6 +28,12 @@ async function extractPdfText(dataBuffer) {
 
 exports.uploadResume = async (req, res) => {
   try {
+    if (!req.file?.path) {
+      return res.status(400).json({
+        error: "Missing resume file. Send form-data with file field `resume`.",
+      });
+    }
+
     const filePath = req.file.path;
     const dataBuffer = fs.readFileSync(filePath);
     const extractedText = await extractPdfText(dataBuffer);
