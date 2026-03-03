@@ -93,12 +93,20 @@ cd frontend
 npm install
 ```
 
-6. Run frontend
+6. (Optional) Create frontend environment file `frontend/.env`
+```env
+# Default is http://localhost:5000/api if omitted
+# Use /api only when running through Vite dev proxy
+VITE_API_BASE_URL=http://localhost:5000/api
+VITE_BACKEND_URL=http://localhost:5000
+```
+
+7. Run frontend
 ```bash
 npm run dev
 ```
 
-7. Open app in browser
+8. Open app in browser
 - Frontend: `http://localhost:5173`
 - Backend: `http://localhost:5000`
 
@@ -128,7 +136,8 @@ npm run preview
 
 ## Notes for Contributors
 - Frontend API base URL is set in `frontend/src/services/api.js`:
-  - `http://localhost:5000/api`
+  - Uses `VITE_API_BASE_URL` (default: `http://localhost:5000/api`)
+  - You can set `VITE_API_BASE_URL=/api` and use Vite dev proxy (`VITE_BACKEND_URL`)
 - Voice input uses browser `MediaRecorder` + backend `/api/test/stt`.
 - If Gemini or MongoDB env values are missing, backend routes will fail.
 

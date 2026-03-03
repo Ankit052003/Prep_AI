@@ -153,7 +153,11 @@ function ResumePage() {
       localStorage.setItem("parsedResume", JSON.stringify(normalized));
       localStorage.removeItem("finalResult");
       setParsedResume(normalized);
-      setSuccess("Resume uploaded and parsed successfully.");
+      setSuccess(
+        response.data?.warning
+          ? `Resume uploaded successfully. ${response.data.warning}`
+          : "Resume uploaded and parsed successfully."
+      );
     } catch (uploadError) {
       const message =
         uploadError.response?.data?.error ||

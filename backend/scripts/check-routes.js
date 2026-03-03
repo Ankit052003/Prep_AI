@@ -56,6 +56,12 @@ const checks = [
     path: "/api/resume/upload",
     data: {},
   },
+  {
+    name: "Speech-to-text",
+    method: "post",
+    path: "/api/test/stt",
+    data: {},
+  },
 ];
 
 async function runCheck({ name, method, path, data }) {

@@ -4,35 +4,30 @@ const featureCards = [
   {
     icon: "R",
     title: "Resume Upload + Parsing",
-    meta: "POST /api/resume/upload",
     description:
       "Multer stores the resume, pdf-parse extracts text, then Gemini structures skills, projects, experience, and education.",
   },
   {
     icon: "Q",
     title: "Interview Question Engine",
-    meta: "POST /api/interview/start",
     description:
       "Generates exactly five technical questions from parsed resume context using the AI service layer.",
   },
   {
     icon: "E",
     title: "Answer Evaluation API",
-    meta: "POST /api/interview/answer",
     description:
       "Evaluates each answer for correctness, clarity, and confidence, then stores score and feedback per response.",
   },
   {
     icon: "F",
     title: "Final Score Aggregation",
-    meta: "POST /api/interview/finish",
     description:
       "Computes average score from saved responses and returns final feedback plus full detailed response history.",
   },
   {
     icon: "S",
     title: "Speech-to-Text Test Route",
-    meta: "POST /api/test/stt",
     description:
       "Uploads webm audio and transcribes speech through Gemini for voice-mode validation and backend testing.",
   },

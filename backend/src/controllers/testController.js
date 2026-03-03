@@ -2,8 +2,14 @@ const fs = require("fs");
 const axios = require("axios");
 
 exports.testSTT = async (req, res) => {
+  const audioPath = req.file?.path;
+
   try {
-    const audioPath = req.file.path;
+    if (!audioPath) {
+      return res.status(400).json({
+        error: "Missing audio file. Send form-data with file field `audio`.",
+      });
+    }
 
     const audioBytes = fs.readFileSync(audioPath).toString("base64");
 
@@ -35,5 +41,9 @@ exports.testSTT = async (req, res) => {
 
   } catch (error) {
     res.status(500).json({ error: error.message });
+  } finally {
+    if (audioPath) {
+      fs.unlink(audioPath, () => {});
+    }
   }
 };
