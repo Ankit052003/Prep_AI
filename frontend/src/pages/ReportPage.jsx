@@ -401,12 +401,12 @@ function ReportPage() {
   return (
     <div className="home-shell app-shell">
       <nav className="home-navbar">
-        <div className="home-brand">
+        <a href="/" className="home-brand" aria-label="PrepAI Home">
           <span className="brand-mark" aria-hidden="true">
             <span />
           </span>
           <span className="brand-text">PrepAI</span>
-        </div>
+        </a>
 
         <div className="home-menu">
           <Link to="/">Home</Link>

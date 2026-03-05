@@ -14,11 +14,13 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.text({ type: "text/plain" }));
 
 // ROUTES
+app.use("/api/auth", require("./routes/authRoutes"));
 app.use("/api/interview", require("./routes/interviewRoutes"));
 app.use("/api/resume", require("./routes/resumeRoutes"));
 app.use("/api/test", require("./routes/testRoutes"));
 
 // Backward-compatible aliases (without /api prefix).
+app.use("/auth", require("./routes/authRoutes"));
 app.use("/interview", require("./routes/interviewRoutes"));
 app.use("/resume", require("./routes/resumeRoutes"));
 app.use("/test", require("./routes/testRoutes"));

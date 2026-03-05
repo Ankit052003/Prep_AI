@@ -17,7 +17,6 @@ const INTERVIEW_DOMAINS = [
   "HR Interview",
   "System Design",
   "Employee Introduction",
-  // you can add domains as you wish
 ];
 const FILLER_WORD_PATTERN = /\b(um+|umm+|uh+|uhh+)\b/gi;
 const MAX_INTERVIEW_HISTORY_ITEMS = 30;
@@ -616,12 +615,12 @@ function InterviewPage() {
   return (
     <div className="home-shell app-shell">
       <nav className="home-navbar">
-        <div className="home-brand">
+        <a href="/" className="home-brand" aria-label="PrepAI Home">
           <span className="brand-mark" aria-hidden="true">
             <span />
           </span>
           <span className="brand-text">PrepAI</span>
-        </div>
+        </a>
 
         <div className="home-menu">
           <Link to="/">Home</Link>

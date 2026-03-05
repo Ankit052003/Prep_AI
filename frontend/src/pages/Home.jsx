@@ -164,12 +164,12 @@ function Home() {
       </div>
 
       <nav className="home-navbar">
-        <div className="home-brand">
+        <a href="/" className="home-brand" aria-label="PrepAI Home">
           <span className="brand-mark" aria-hidden="true">
             <span />
           </span>
           <span className="brand-text">PrepAI</span>
-        </div>
+        </a>
 
         <div className="home-menu">
           <a href="#hero">Home</a>
@@ -181,10 +181,10 @@ function Home() {
         <div className="nav-actions">
           <button
             type="button"
-            onClick={() => navigate("/resume")}
+            onClick={() => navigate("/signup")}
             className="home-signin"
           >
-            Sign In
+            Sign Up
           </button>
           <ThemeToggleButton />
         </div>
