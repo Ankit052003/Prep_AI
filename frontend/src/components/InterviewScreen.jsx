@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import API from "../services/api";
 
 function InterviewScreen({ parsedResume }) {
@@ -6,21 +6,36 @@ function InterviewScreen({ parsedResume }) {
   const [interviewId, setInterviewId] = useState("");
   const [recording, setRecording] = useState(false);
 
-  let mediaRecorder;
-  let audioChunks = [];
+  const recorderRef = useRef(null);
+  const streamRef = useRef(null);
+  const chunksRef = useRef([]);
 
-  // 🎯 Start Interview
-  const startInterview = async () => {
-    const res = await API.post("/interview/start", {
-      parsedResume,
-    });
+  const releaseMicResources = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
 
-    setInterviewId(res.data.interviewId);
-    setQuestion(res.data.question);
+    recorderRef.current = null;
+    chunksRef.current = [];
+    setRecording(false);
   };
 
-  // 🔊 Speak Question (FREE TTS)
+  const startInterview = async () => {
+    try {
+      const res = await API.post("/interview/start", {
+        parsedResume,
+      });
+
+      setInterviewId(res.data.interviewId);
+      setQuestion(res.data.question);
+    } catch (error) {
+      alert(error.response?.data?.error || error.message || "Failed to start interview.");
+    }
+  };
+
   const speak = (text) => {
+    if (!text || !("speechSynthesis" in window)) return;
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = "en-US";
     speechSynthesis.speak(utterance);
@@ -32,40 +47,120 @@ function InterviewScreen({ parsedResume }) {
     }
   }, [question]);
 
-  // 🎤 Start Recording
-  const startRecording = async () => {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
-    mediaRecorder = new MediaRecorder(stream);
-
-    mediaRecorder.ondataavailable = (event) => {
-      audioChunks.push(event.data);
+  useEffect(() => {
+    return () => {
+      const recorder = recorderRef.current;
+      if (recorder && recorder.state !== "inactive") {
+        recorder.stop();
+      }
+      releaseMicResources();
     };
+  }, []);
 
-    mediaRecorder.start();
-    setRecording(true);
+  const startRecording = async () => {
+    if (!question || !interviewId) {
+      alert("Start the interview first.");
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+
+      streamRef.current = stream;
+      recorderRef.current = mediaRecorder;
+      chunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data?.size) {
+          chunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onerror = () => {
+        alert("Recording failed. Please retry.");
+        releaseMicResources();
+      };
+
+      mediaRecorder.onstop = async () => {
+        try {
+          const audioBlob = new Blob(chunksRef.current, { type: "audio/webm" });
+          if (!audioBlob.size) {
+            alert("No audio captured. Please record again.");
+            return;
+          }
+
+          const formData = new FormData();
+          formData.append("audio", audioBlob, "answer.webm");
+
+          let sttResponse;
+          try {
+            sttResponse = await API.post("/test/stt", formData, {
+              headers: { "Content-Type": "multipart/form-data" },
+            });
+          } catch (sttError) {
+            if (sttError.response?.status !== 404) {
+              throw sttError;
+            }
+            sttResponse = await API.post("/interview/voice-answer", formData, {
+              headers: { "Content-Type": "multipart/form-data" },
+            });
+          }
+
+          const transcript = String(
+            sttResponse.data?.transcript || sttResponse.data?.text || ""
+          ).trim();
+
+          if (!transcript) {
+            alert("Transcription returned empty text. Please retry.");
+            return;
+          }
+
+          const answerResponse = await API.post("/interview/answer", {
+            interviewId,
+            answer: transcript,
+          });
+
+          alert(`Score: ${answerResponse.data?.score ?? "N/A"}`);
+          setQuestion(answerResponse.data?.nextQuestion || "");
+
+          if (!answerResponse.data?.nextQuestion) {
+            alert(answerResponse.data?.message || "Interview completed.");
+          }
+        } catch (error) {
+          const status = error.response?.status;
+          const endpoint = error.config?.url || "unknown-endpoint";
+          const backendMessage = error.response?.data?.error;
+
+          if (status === 404) {
+            alert(
+              `Voice endpoint not found (404) at ${endpoint}. Tried /test/stt and /interview/voice-answer.`
+            );
+            return;
+          }
+
+          const message = backendMessage || error.message || "Voice processing failed.";
+          alert(`Voice processing failed at ${endpoint}${status ? ` (${status})` : ""}: ${message}`);
+        } finally {
+          releaseMicResources();
+        }
+      };
+
+      mediaRecorder.start();
+      setRecording(true);
+    } catch (error) {
+      alert(error.response?.data?.error || error.message || "Microphone access denied.");
+      releaseMicResources();
+    }
   };
 
-  // 🎤 Stop Recording
   const stopRecording = () => {
-    mediaRecorder.stop();
+    const recorder = recorderRef.current;
+    if (!recorder) return;
 
-    mediaRecorder.onstop = async () => {
-      const audioBlob = new Blob(audioChunks, { type: "audio/webm" });
-
-      const formData = new FormData();
-      formData.append("audio", audioBlob);
-      formData.append("interviewId", interviewId);
-
-      const res = await API.post(
-        "/interview/voice-answer",
-        formData
-      );
-
-      alert("Score: " + res.data.evaluation.overallScore);
-      setRecording(false);
-      audioChunks = [];
-    };
+    if (recorder.state !== "inactive") {
+      recorder.stop();
+    }
   };
 
   return (

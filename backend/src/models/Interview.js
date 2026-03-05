@@ -5,6 +5,10 @@ const interviewSchema = new mongoose.Schema(
     user: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
 
     resumeData: Object,
+    domain: {
+      type: String,
+      default: "General",
+    },
 
     questions: [String],
 
@@ -14,6 +18,7 @@ const interviewSchema = new mongoose.Schema(
         answer: String,
         evaluation: String,
         score: Number,
+        evaluationDetails: mongoose.Schema.Types.Mixed,
       },
     ],
 

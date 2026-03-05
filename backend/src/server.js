@@ -18,6 +18,11 @@ app.use("/api/interview", require("./routes/interviewRoutes"));
 app.use("/api/resume", require("./routes/resumeRoutes"));
 app.use("/api/test", require("./routes/testRoutes"));
 
+// Backward-compatible aliases (without /api prefix).
+app.use("/interview", require("./routes/interviewRoutes"));
+app.use("/resume", require("./routes/resumeRoutes"));
+app.use("/test", require("./routes/testRoutes"));
+
 app.get("/", (req, res) => {
   res.send("AI Interview Backend Running...");
 });

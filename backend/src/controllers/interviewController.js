@@ -2,6 +2,22 @@ const Interview = require("../models/Interview");
 const { generateQuestions, evaluateAnswer } = require("../services/aiService");
 const mongoose = require("mongoose");
 
+const INTERVIEW_DOMAINS = [
+  "Frontend Developer",
+  "Backend Developer",
+  "Data Structures",
+  "HR Interview",
+  "System Design",
+  "Employee Introduction",
+];
+
+const DOMAIN_LOOKUP = new Map(
+  INTERVIEW_DOMAINS.map((domain) => [domain.toLowerCase(), domain])
+);
+const DEFAULT_QUESTION_COUNT = 5;
+const MIN_QUESTION_COUNT = 1;
+const MAX_QUESTION_COUNT = 20;
+
 function getRequestBody(req) {
   const rawBody = req.body;
 
@@ -50,6 +66,37 @@ function parseQuestionList(questionsText) {
     .filter(Boolean);
 }
 
+function normalizeDomain(rawDomain) {
+  if (typeof rawDomain !== "string") {
+    return null;
+  }
+
+  const normalizedDomain = rawDomain.trim().toLowerCase();
+  if (!normalizedDomain) {
+    return null;
+  }
+
+  return DOMAIN_LOOKUP.get(normalizedDomain) || null;
+}
+
+function normalizeQuestionCount(rawQuestionCount) {
+  if (rawQuestionCount === undefined || rawQuestionCount === null || rawQuestionCount === "") {
+    return null;
+  }
+
+  const numericQuestionCount = Number(rawQuestionCount);
+  if (!Number.isFinite(numericQuestionCount)) {
+    return null;
+  }
+
+  const roundedCount = Math.floor(numericQuestionCount);
+  if (roundedCount < MIN_QUESTION_COUNT || roundedCount > MAX_QUESTION_COUNT) {
+    return null;
+  }
+
+  return roundedCount;
+}
+
 exports.startInterview = async (req, res) => {
   try {
     const body = getRequestBody(req);
@@ -58,6 +105,14 @@ exports.startInterview = async (req, res) => {
       body.parsedData ??
       body.resumeData ??
       body.resumeText;
+    const selectedDomain = normalizeDomain(
+      body.domain ?? body.interviewDomain ?? body.track ?? body.specialization
+    );
+    const rawQuestionCount =
+      body.questionCount ?? body.totalQuestions ?? body.questionsCount ?? body.numQuestions;
+    const normalizedQuestionCount = normalizeQuestionCount(rawQuestionCount);
+    const questionCount =
+      normalizedQuestionCount === null ? DEFAULT_QUESTION_COUNT : normalizedQuestionCount;
 
     if (!parsedResume) {
       return res.status(400).json({
@@ -66,8 +121,14 @@ exports.startInterview = async (req, res) => {
       });
     }
 
-    const questionsText = await generateQuestions(parsedResume);
-    const questions = parseQuestionList(questionsText);
+    if (rawQuestionCount !== undefined && normalizedQuestionCount === null) {
+      return res.status(400).json({
+        error: `Invalid question count. Send integer questionCount between ${MIN_QUESTION_COUNT} and ${MAX_QUESTION_COUNT}.`,
+      });
+    }
+
+    const questionsText = await generateQuestions(parsedResume, selectedDomain, questionCount);
+    const questions = parseQuestionList(questionsText).slice(0, questionCount);
     if (!questions.length) {
       return res.status(502).json({
         error: "Failed to generate interview questions from resume data.",
@@ -76,12 +137,16 @@ exports.startInterview = async (req, res) => {
 
     const interview = await Interview.create({
       resumeData: parsedResume,
+      domain: selectedDomain || "General",
       questions,
     });
 
     res.json({
       interviewId: interview._id,
+      domain: interview.domain,
       question: questions[0],
+      totalQuestions: questions.length,
+      requestedQuestionCount: questionCount,
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -136,16 +201,25 @@ exports.submitAnswer = async (req, res) => {
 
     const currentQuestion = interview.questions[currentIndex];
 
-    const evaluation = await evaluateAnswer(currentQuestion, answer);
+    const evaluationResult = await evaluateAnswer(currentQuestion, answer, {
+      domain: interview.domain,
+      resumeData: interview.resumeData,
+    });
 
-    const scoreMatch = evaluation.match(/(\d+)/);
-    const score = scoreMatch ? parseInt(scoreMatch[0]) : 5;
+    const score = Number.isFinite(Number(evaluationResult?.score))
+      ? Number(evaluationResult.score)
+      : 5;
+    const evaluation =
+      typeof evaluationResult?.feedback === "string" && evaluationResult.feedback.trim()
+        ? evaluationResult.feedback
+        : "Evaluation unavailable.";
 
     interview.responses.push({
       question: currentQuestion,
       answer,
       evaluation,
       score,
+      evaluationDetails: evaluationResult || null,
     });
 
     interview.currentQuestionIndex += 1;
@@ -158,6 +232,8 @@ exports.submitAnswer = async (req, res) => {
         answer,
         score,
         evaluation,
+        evaluationDetails: evaluationResult || null,
+        totalQuestions: interview.questions.length,
         nextQuestion: interview.questions[interview.currentQuestionIndex],
       });
     } else {
@@ -166,6 +242,8 @@ exports.submitAnswer = async (req, res) => {
         answer,
         score,
         evaluation,
+        evaluationDetails: evaluationResult || null,
+        totalQuestions: interview.questions.length,
         message: "Interview completed. Please finish interview.",
       });
     }
@@ -213,6 +291,7 @@ exports.finishInterview = async (req, res) => {
       finalScore: averageScore,
       feedback: interview.finalFeedback,
       detailedResponses: interview.responses,
+      totalQuestions: interview.questions.length,
     });
   } catch (error) {
     res.status(500).json({ error: error.message });

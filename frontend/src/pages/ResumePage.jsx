@@ -1,6 +1,23 @@
 import { useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { motion } from "framer-motion";
 import API from "../services/api";
+import ThemeToggleButton from "../components/ThemeToggleButton";
+
+const revealUp = {
+  hidden: { opacity: 0, y: 40 },
+  show: { opacity: 1, y: 0 },
+};
+const revealStagger = {
+  hidden: {},
+  show: {
+    transition: {
+      staggerChildren: 0.12,
+      delayChildren: 0.08,
+    },
+  },
+};
+const revealViewport = { once: true, amount: 0.2 };
 
 function parseResumePayload(rawValue) {
   if (!rawValue) return null;
@@ -195,22 +212,38 @@ function ResumePage() {
           <Link to="/report">Report</Link>
         </div>
 
-        <button type="button" className="home-signin" onClick={() => navigate("/interview")}>
-          Go To Interview
-        </button>
+        <div className="nav-actions">
+          <button type="button" className="home-signin" onClick={() => navigate("/interview")}>
+            Go To Interview
+          </button>
+          <ThemeToggleButton />
+        </div>
       </nav>
 
       <main className="app-page">
-        <section className="app-page-header home-fade-up">
+        <motion.section
+          className="app-page-header home-fade-up"
+          variants={revealUp}
+          initial="hidden"
+          whileInView="show"
+          viewport={revealViewport}
+          transition={{ duration: 0.5, ease: "easeOut" }}
+        >
           <p className="app-kicker">Step 1</p>
           <h1>Upload Your Resume</h1>
           <p>
             Upload a PDF, let PrepAI parse your profile, then continue to your interview flow.
           </p>
-        </section>
+        </motion.section>
 
-        <section className="app-grid home-fade-up">
-          <article className="glass-card">
+        <motion.section
+          className="app-grid home-fade-up"
+          variants={revealStagger}
+          initial="hidden"
+          whileInView="show"
+          viewport={revealViewport}
+        >
+          <motion.article className="glass-card" variants={revealUp}>
             <h2>Resume File</h2>
             <p className="muted-copy">
               Use a clean PDF format for best extraction quality. A new upload replaces previous data.
@@ -235,9 +268,9 @@ function ResumePage() {
 
             {error && <p className="app-alert error">{error}</p>}
             {success && <p className="app-alert success">{success}</p>}
-          </article>
+          </motion.article>
 
-          <article className="glass-card">
+          <motion.article className="glass-card" variants={revealUp}>
             <h2>Parsed Resume Preview</h2>
             {!parsedResume && <p className="muted-copy">No parsed resume found yet. Upload a file to see extracted details.</p>}
 
@@ -259,8 +292,8 @@ function ResumePage() {
                 ))}
               </div>
             )}
-          </article>
-        </section>
+          </motion.article>
+        </motion.section>
       </main>
     </div>
   );
