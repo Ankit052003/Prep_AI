@@ -8,6 +8,7 @@ import { getStoredUser, persistAuthSession, subscribeAuthChanges } from "../serv
 
 const SIGNUP_VIDEO_SOURCE = import.meta.env.VITE_SIGNUP_VIDEO_URL || "/signup-loop.mp4";
 const MIN_PASSWORD_LENGTH = 8;
+const GOOGLE_OAUTH_SCOPE = "openid email profile";
 
 function getPasswordStrength(password) {
   let strengthScore = 0;
@@ -63,10 +64,15 @@ function SignupPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isGoogleSubmitting, setIsGoogleSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [videoUnavailable, setVideoUnavailable] = useState(false);
   const [loggedInUser, setLoggedInUser] = useState(() => getStoredUser());
+  const [googleClientId, setGoogleClientId] = useState(() =>
+    String(import.meta.env.VITE_GOOGLE_CLIENT_ID || "").trim()
+  );
+  const googleConfigRequestedRef = useRef(false);
 
   useEffect(() => {
     const videoElement = videoRef.current;
@@ -259,6 +265,33 @@ function SignupPage() {
 
   useEffect(() => subscribeAuthChanges(() => setLoggedInUser(getStoredUser())), []);
 
+  useEffect(() => {
+    if (googleClientId || googleConfigRequestedRef.current) {
+      return;
+    }
+
+    googleConfigRequestedRef.current = true;
+
+    let isMounted = true;
+    api
+      .get("/auth/google/config")
+      .then((response) => {
+        if (!isMounted) {
+          return;
+        }
+
+        const serverClientId = String(response?.data?.clientId || "").trim();
+        if (serverClientId) {
+          setGoogleClientId(serverClientId);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      isMounted = false;
+    };
+  }, [googleClientId]);
+
   const passwordStrength = useMemo(
     () => getPasswordStrength(formData.password),
     [formData.password]
@@ -291,6 +324,139 @@ function SignupPage() {
     }
 
     setSearchParams(nextParams);
+  };
+
+  const resolveGoogleClientId = async () => {
+    if (googleClientId) {
+      return googleClientId;
+    }
+
+    try {
+      const response = await api.get("/auth/google/config");
+      const serverClientId = String(response?.data?.clientId || "").trim();
+
+      if (serverClientId) {
+        setGoogleClientId(serverClientId);
+        return serverClientId;
+      }
+    } catch (_error) {
+      // Fallback to empty; caller handles user-facing message.
+    }
+
+    return "";
+  };
+
+  const waitForGoogleOauthClient = async (timeoutMs = 5000) => {
+    const startedAt = Date.now();
+
+    return new Promise((resolve) => {
+      const poll = () => {
+        const oauthClient = window.google?.accounts?.oauth2;
+        if (oauthClient?.initTokenClient) {
+          resolve(oauthClient);
+          return;
+        }
+
+        if (Date.now() - startedAt >= timeoutMs) {
+          resolve(null);
+          return;
+        }
+
+        window.setTimeout(poll, 120);
+      };
+
+      poll();
+    });
+  };
+
+  const handleGoogleAuth = async () => {
+    setError("");
+    setSuccess("");
+
+    if (isSubmitting || isGoogleSubmitting) {
+      return;
+    }
+
+    setIsGoogleSubmitting(true);
+
+    try {
+      const resolvedClientId = await resolveGoogleClientId();
+      if (!resolvedClientId) {
+        setError(
+          "Google sign-in is not configured. Set GOOGLE_CLIENT_ID on backend or VITE_GOOGLE_CLIENT_ID on frontend."
+        );
+        setIsGoogleSubmitting(false);
+        return;
+      }
+
+      const googleOauthClient = await waitForGoogleOauthClient();
+      if (!googleOauthClient) {
+        setError("Google sign-in script did not load. Refresh the page and try again.");
+        setIsGoogleSubmitting(false);
+        return;
+      }
+
+      const tokenClient = googleOauthClient.initTokenClient({
+        client_id: resolvedClientId,
+        scope: GOOGLE_OAUTH_SCOPE,
+        callback: async (tokenResponse) => {
+          try {
+            const googleError = String(tokenResponse?.error || "").trim();
+            const accessToken = String(tokenResponse?.access_token || "").trim();
+
+            if (googleError) {
+              setError("Google sign-in was cancelled or blocked.");
+              return;
+            }
+
+            if (!accessToken) {
+              setError("Google sign-in did not return an access token.");
+              return;
+            }
+
+            const response = await api.post("/auth/google", { accessToken });
+            const authToken = response?.data?.token;
+            const googleUser = response?.data?.user;
+
+            persistAuthSession(authToken, googleUser);
+            setLoggedInUser(getStoredUser());
+
+            const rememberedIdentifier = String(googleUser?.email || "").trim();
+            if (formData.rememberMe && rememberedIdentifier) {
+              window.localStorage.setItem("prepai-remember-identity", rememberedIdentifier);
+            }
+
+            setSuccess(`Google sign-in successful. Redirecting to ${redirectPath || "/resume"}...`);
+
+            window.setTimeout(() => {
+              navigate(redirectPath || "/resume");
+            }, 700);
+          } catch (requestError) {
+            const message =
+              requestError?.response?.data?.error ||
+              requestError?.message ||
+              "Unable to sign in with Google right now. Please try again.";
+            setError(message);
+          } finally {
+            setIsGoogleSubmitting(false);
+          }
+        },
+        error_callback: () => {
+          setError("Google sign-in popup was closed or blocked.");
+          setIsGoogleSubmitting(false);
+        },
+      });
+
+      try {
+        tokenClient.requestAccessToken({ prompt: "select_account" });
+      } catch (_error) {
+        setError("Unable to open Google sign-in popup. Please allow popups and try again.");
+        setIsGoogleSubmitting(false);
+      }
+    } catch (_error) {
+      setError("Unable to start Google sign-in. Please try again.");
+      setIsGoogleSubmitting(false);
+    }
   };
 
   const handleSubmit = async (event) => {
@@ -441,10 +607,40 @@ function SignupPage() {
               </p>
             ) : null}
 
-            <div className="signup-socials" aria-hidden="true">
-              <span>f</span>
-              <span>G</span>
-              <span>A</span>
+            <div className="signup-socials">
+              <button
+                type="button"
+                className="signup-social-google"
+                onClick={handleGoogleAuth}
+                disabled={isSubmitting || isGoogleSubmitting}
+                aria-label="Continue with Google"
+              >
+                <svg
+                  className="signup-social-google-icon"
+                  viewBox="0 0 256 262"
+                  xmlns="http://www.w3.org/2000/svg"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  <path
+                    fill="#4285F4"
+                    d="M255.68 133.5c0-10.3-.84-20.66-2.65-30.82H130.7v58.35h70.07c-2.9 18.81-13.81 35.43-29.92 45.99v38.2h48.32c28.36-26.1 44.5-64.64 44.5-111.72Z"
+                  />
+                  <path
+                    fill="#34A853"
+                    d="M130.7 261.1c35.02 0 64.53-11.5 86.05-31.16l-48.32-38.2c-13.45 9.16-30.8 14.37-37.73 14.37-28.98 0-53.5-19.57-62.28-45.88H18.6v39.37C40.65 237.28 82.6 261.1 130.7 261.1Z"
+                  />
+                  <path
+                    fill="#FBBC05"
+                    d="M68.42 160.23c-2.24-6.62-3.52-13.72-3.52-20.98 0-7.27 1.28-14.37 3.52-20.99V78.9H18.6A130.96 130.96 0 0 0 0 139.25c0 21.12 5.04 41.12 18.6 60.35l49.82-39.37Z"
+                  />
+                  <path
+                    fill="#EA4335"
+                    d="M130.7 51.08c19.06 0 36.24 6.56 49.74 19.41l37.1-37.1C195.12 12.53 165.71 0 130.7 0 82.6 0 40.65 23.82 18.6 78.9l49.82 39.36c8.78-26.3 33.3-45.88 62.28-45.88Z"
+                  />
+                </svg>
+                <span>{isGoogleSubmitting ? "Connecting..." : "Continue with Google"}</span>
+              </button>
             </div>
 
             <div className="signup-divider">
