@@ -80,7 +80,7 @@ exports.testTTS = async (req, res) => {
     if (!apiKey) {
       return;
     }
-
+    console.log("req reached here");
     const rawText = req.body?.text ?? req.body?.question;
     const text = typeof rawText === "string" ? rawText.trim() : "";
     if (!text) {
@@ -88,7 +88,7 @@ exports.testTTS = async (req, res) => {
         error: "Missing required field `text` for speech synthesis.",
       });
     }
-
+    console.log("req reached here 2");
     return res.status(501).json({
       error:
         "Text-to-speech is not available in this Grok REST integration yet. The frontend will fall back to browser speech synthesis.",

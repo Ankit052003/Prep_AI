@@ -2,7 +2,7 @@ import axios from "axios";
 import { getAuthToken } from "./auth";
 
 function normalizeApiBaseUrl(rawBaseUrl) {
-  const fallbackBaseUrl = "http://localhost:5000/api";
+  const fallbackBaseUrl = "https://ai-interview-backend-hff4.onrender.com";
 
   if (!rawBaseUrl || typeof rawBaseUrl !== "string") {
     return fallbackBaseUrl;
