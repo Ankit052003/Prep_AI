@@ -345,8 +345,8 @@ body {
   border: 1px solid var(--signup-btn-border);
   background: var(--signup-btn-bg);
   border-radius: 999px;
-  width: 2.9rem;
-  height: 2.9rem;
+  width: 2.35rem;
+  height: 2.35rem;
   padding: 0;
   display: inline-flex;
   align-items: center;
@@ -367,9 +367,13 @@ body {
 }
 
 .home-signup-icon {
-  width: 2rem;
-  height: 2rem;
+  width: 1.05rem;
+  height: 1.05rem;
   display: block;
+}
+
+:root[data-theme="dark"] .home-signup-icon {
+  filter: invert(1);
 }
 
 .profile-menu-shell {
@@ -1221,13 +1225,13 @@ body {
   }
 
   .home-signup-btn {
-    width: 2.35rem;
-    height: 2.35rem;
+    width: 2rem;
+    height: 2rem;
   }
 
   .home-signup-icon {
-    width: 1.56rem;
-    height: 1.56rem;
+    width: 0.92rem;
+    height: 0.92rem;
   }
 
   .profile-menu-trigger {
