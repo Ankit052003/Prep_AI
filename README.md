@@ -1,154 +1,271 @@
-# PrepAI - AI Interview Practice Platform
+# PrepAI
 
-PrepAI is a full-stack application that helps candidates practice technical interviews using AI.
-It supports resume upload/parsing, AI-generated interview questions, answer evaluation, voice-to-text input, and a final interview report.
+PrepAI is a full-stack AI mock interview platform. It lets a user upload a resume, generate role-focused interview questions, answer by text or voice, get per-question scoring/feedback, and review a final analytics report.
 
-## Live Concept
-- Upload your resume (PDF)
-- Generate 5 tailored technical questions from your resume
-- Answer by text or voice
-- Receive per-answer feedback + score
-- Finish interview and get final report
+## Highlights
 
-## Project Stack
-- Frontend: React 19, React Router, Axios, Vite
-- Backend: Node.js, Express, Mongoose, Multer, pdf-parse, Axios
+- Resume upload and parsing (PDF only)
+- AI-generated interview questions (configurable count: 1 to 20)
+- Domain-based interview tracks:
+  - Frontend Developer
+  - Backend Developer
+  - Data Structures
+  - HR Interview
+  - System Design
+  - Employee Introduction
+- Answer evaluation with score + structured feedback
+- Voice answer mode with live waveform/intensity
+- Confidence metrics (client-side) from transcript/audio stats
+- Final report with score trends and weak-topic analysis
+- Auth (register/login/me) with JWT
+- Resume persistence for logged-in users
+
+## Tech Stack
+
+- Frontend: React 19, React Router 7, Framer Motion, Axios, Vite, Tailwind CSS v4, react-loading-skeleton
+- Backend: Node.js, Express 5, Mongoose, Multer, pdf-parse, Axios
 - Database: MongoDB
-- AI: xAI Grok API (`/v1/chat/completions`)
+- AI Layer:
+  - Chat completion via xAI/Groq-compatible OpenAI-style endpoint
+  - STT via Groq-compatible transcription endpoint
+  - TTS endpoint currently returns `501` and frontend falls back to browser speech synthesis
 
 ## Monorepo Structure
+
 ```text
 interview-prep-ai/
   backend/
+    scripts/
+      check-routes.js
     src/
       config/
       controllers/
+      middleware/
       models/
       routes/
       services/
-    scripts/
   frontend/
+    public/
     src/
-      pages/
+      assets/
       components/
+      context/
+      pages/
       services/
 ```
 
-## Core Features
-1. Resume upload and parsing
-2. Interview question generation (5 questions)
-3. Answer evaluation with score + feedback
-4. Voice mode (record -> speech-to-text -> submit answer)
-5. Final report with overall score and detailed responses
+## Application Flow
 
-## API Overview
-Base URL: `http://localhost:5000`
+1. User uploads resume PDF on `/resume`.
+2. Backend extracts text from PDF and calls AI parser.
+3. Parsed resume is saved locally in browser; if authenticated, it is also saved in MongoDB (`Resume` model).
+4. User starts interview on `/interview`.
+5. Backend generates questions from parsed resume + selected domain.
+6. User submits text or voice answers.
+7. Each answer is evaluated and scored (`0-10`) and stored in `Interview.responses`.
+8. User finishes interview and navigates to `/report` for final analytics.
 
-- `GET /` -> backend health check
-- `POST /api/resume/upload` -> upload resume file (`form-data`, key: `resume`)
-- `POST /api/interview/start` -> start interview from parsed resume
-- `POST /api/interview/generate` -> alias of start
+## Frontend Pages
+
+- `/` Home page with animated landing sections
+- `/signup` Register/Login page
+- `/resume` Resume upload + parsed preview
+- `/interview` Interview engine (question flow, text/voice answer, waveform, auto-read)
+- `/report` Final report + historical progress analytics
+
+Routes are lazy-loaded with Suspense fallback skeleton UI.
+
+## Voice + Speech Behavior
+
+- Voice input:
+  - Uses `MediaRecorder` in browser
+  - Sends audio to `/api/test/stt`
+  - If route not found (404), retries `/api/interview/voice-answer`
+- STT support:
+  - Available only when provider resolves to Groq-compatible transcription in current backend setup
+- Question reading (TTS):
+  - Frontend first tries `/api/test/tts` with a short soft-wait
+  - If unavailable/slow, it falls back to browser `speechSynthesis`
+  - TTS responses are cached in-memory per question text on the page
+
+## API Reference
+
+Base backend URL (local): `http://localhost:5000`
+
+Notes:
+- All routes are mounted under `/api/*`
+- Backward-compatible aliases also exist without `/api` (for example `/auth/login`)
+
+### Health
+
+- `GET /` -> returns backend running message
+
+### Auth
+
+- `POST /api/auth/signup` -> create account
+- `POST /api/auth/register` -> alias for signup
+- `POST /api/auth/login` -> login
+- `GET /api/auth/me` -> current user (requires Bearer token)
+
+### Resume
+
+- `POST /api/resume/upload` -> upload PDF (`multipart/form-data`, field `resume`)
+  - Optional auth: if token present, parsed resume is saved to DB for user
+- `GET /api/resume/me` -> fetch saved parsed resume (auth required)
+- `DELETE /api/resume/me` -> delete saved parsed resume (auth required)
+
+### Interview
+
+- `POST /api/interview/start` -> start interview session
+- `POST /api/interview/generate` -> alias for start
 - `POST /api/interview/answer` -> submit answer
-- `POST /api/interview/:interviewId/answer` -> submit answer (path param variant)
-- `POST /api/interview/evaluate` -> alias of answer
-- `POST /api/interview/finish` -> final score + report
-- `POST /api/test/stt` -> speech-to-text test (`form-data`, key: `audio`)
+- `POST /api/interview/:interviewId/answer` -> submit answer (param variant)
+- `POST /api/interview/evaluate` -> alias for answer
+- `POST /api/interview/finish` -> finalize interview and get final score/report
+- `POST /api/interview/voice-answer` -> voice transcription alias (multipart audio)
 
-## Prerequisites
-- Node.js 20+ (recommended)
+### Test Utilities
+
+- `POST /api/test/stt` -> speech-to-text transcription (`multipart/form-data`, field `audio`)
+- `POST /api/test/tts` -> currently returns `501` in this integration
+
+## Key Request Shapes
+
+### Start Interview
+
+`POST /api/interview/start`
+
+```json
+{
+  "parsedResume": { "skills": ["..."] },
+  "domain": "Frontend Developer",
+  "questionCount": 3
+}
+```
+
+Accepted resume payload aliases: `parsedResume`, `parsedData`, `resumeData`, `resumeText`.
+
+### Submit Answer
+
+`POST /api/interview/answer`
+
+```json
+{
+  "interviewId": "mongo_object_id",
+  "answer": "Your answer here"
+}
+```
+
+### Finish Interview
+
+`POST /api/interview/finish`
+
+```json
+{
+  "interviewId": "mongo_object_id"
+}
+```
+
+## Data Models (MongoDB)
+
+- `User`
+  - `name`, optional unique `username`, optional unique `email`, `password` (hashed)
+- `Resume`
+  - one-per-user (`user` unique), `parsedData`
+- `Interview`
+  - `user` (optional), `resumeData`, `domain`, `questions[]`, `responses[]`, `currentQuestionIndex`, `finalScore`, `finalFeedback`
+
+## Local Storage Keys Used by Frontend
+
+- `prepai-auth-token`
+- `prepai-user`
+- `prepai-remember-identity`
+- `parsedResume`
+- `finalResult`
+- `interviewHistory`
+- `selectedInterviewDomain`
+- `selectedInterviewQuestionCount`
+
+## Setup (Local Development)
+
+### Prerequisites
+
+- Node.js 20+ recommended
 - npm
-- MongoDB (local or Atlas)
-- xAI API key (Grok)
+- MongoDB instance (local or cloud)
 
-## Clone and Run Locally
-1. Clone the repository
+### 1) Clone
+
 ```bash
 git clone https://github.com/Ankit052003/Prep_AI.git
 cd Prep_AI
 ```
 
-2. Install backend dependencies
+### 2) Backend
+
 ```bash
 cd backend
 npm install
-```
-
-3. Create backend environment file `backend/.env`
-```env
-PORT=5000
-MONGO_URI=your_mongodb_connection_string
-GROK_API_KEY=your_grok_api_key
-GROK_MODEL=grok-3-mini
-GROK_API_BASE=https://api.x.ai/v1
-```
-
-4. Run backend
-```bash
 npm run dev
 ```
 
-5. Install frontend dependencies (new terminal)
+Backend runs on `http://localhost:5000` by default.
+
+### 3) Frontend
+
+Open a second terminal:
+
 ```bash
 cd frontend
 npm install
-```
-
-6. (Optional) Create frontend environment file `frontend/.env`
-```env
-# Default is http://localhost:5000/api if omitted
-# Use /api only when running through Vite dev proxy
-VITE_API_BASE_URL=http://localhost:5000/api
-VITE_BACKEND_URL=http://localhost:5000
-```
-
-7. Run frontend
-```bash
 npm run dev
 ```
 
-8. Open app in browser
-- Frontend: `http://localhost:5173`
-- Backend: `http://localhost:5000`
+Frontend runs on `http://localhost:5173` by default.
 
-## Typical User Flow
-1. Open homepage
-2. Go to Resume page and upload PDF
-3. Continue to Interview page
-4. Start interview
-5. Submit answers (text/voice)
-6. Finish interview
-7. Review report
+## Environment Configuration Notes
 
-## Useful Commands
-Backend:
-```bash
-npm run dev
-npm start
-npm run check:routes
-```
+This README intentionally omits API-key values/details.
 
-Frontend:
-```bash
-npm run dev
-npm run build
-npm run preview
-```
+- Backend requires database/auth/AI provider configuration in `backend/.env`.
+- Frontend supports optional env overrides for API base/proxy target/media URLs.
+- Vite proxy target defaults to `http://localhost:5000` in `frontend/vite.config.ts`.
+- Frontend API client default base is `http://localhost:5000/api` if no override is provided.
 
-## Notes for Contributors
-- Frontend API base URL is set in `frontend/src/services/api.js`:
-  - Uses `VITE_API_BASE_URL` (default: `http://localhost:5000/api`)
-  - You can set `VITE_API_BASE_URL=/api` and use Vite dev proxy (`VITE_BACKEND_URL`)
-- Voice input uses browser `MediaRecorder` + backend `/api/test/stt`.
-- Grok REST is used for text generation/evaluation. Voice STT/TTS routes currently return `501` with guidance.
-- If Grok or MongoDB env values are missing, backend routes will fail.
+## Scripts
+
+### Backend (`backend/package.json`)
+
+- `npm run dev` -> start with nodemon
+- `npm start` -> start with node
+- `npm run check:routes` -> route existence/status check script
+
+### Frontend (`frontend/package.json`)
+
+- `npm run dev` -> start Vite dev server
+- `npm run build` -> type-check + production build
+- `npm run lint` -> ESLint
+- `npm run preview` -> preview production build
+
+## Current Constraints / Known Behavior
+
+- Backend TTS endpoint (`/api/test/tts`) currently returns `501`; browser speech synthesis is used as fallback.
+- STT is wired for Groq-compatible transcription in this backend flow.
+- Resume upload accepts PDF only.
+- Interview question generation defaults to `1` question if not specified.
 
 ## Troubleshooting
-- `GROK_API_KEY is not set`
-  - Ensure `backend/.env` exists and backend was restarted.
-- MongoDB connection error
-  - Verify `MONGO_URI` is valid and database is reachable.
-- CORS/API issues
-  - Ensure backend is running on `5000` and frontend on `5173`.
+
+- Backend fails on startup:
+  - Verify MongoDB is reachable and backend env config is present.
+- `401` on protected routes:
+  - Ensure Bearer token is sent from frontend auth session.
+- Voice transcription not working:
+  - Confirm browser microphone permission is granted.
+  - Check `/api/test/stt` availability and provider compatibility.
+- Slow/failed question audio reading:
+  - App automatically falls back to browser TTS if backend TTS is unavailable.
 
 ## License
-This project is for educational/interview-practice use. Add your preferred open-source license if needed.
+
+MIT License. See [LICENSE](./LICENSE).
