@@ -14,7 +14,7 @@ It supports resume upload/parsing, AI-generated interview questions, answer eval
 - Frontend: React 19, React Router, Axios, Vite
 - Backend: Node.js, Express, Mongoose, Multer, pdf-parse, Axios
 - Database: MongoDB
-- AI: Google Gemini API (`generateContent`)
+- AI: xAI Grok API (`/v1/chat/completions`)
 
 ## Monorepo Structure
 ```text
@@ -58,7 +58,7 @@ Base URL: `http://localhost:5000`
 - Node.js 20+ (recommended)
 - npm
 - MongoDB (local or Atlas)
-- Google AI API key (Gemini)
+- xAI API key (Grok)
 
 ## Clone and Run Locally
 1. Clone the repository
@@ -77,9 +77,9 @@ npm install
 ```env
 PORT=5000
 MONGO_URI=your_mongodb_connection_string
-GOOGLE_AI_API_KEY=your_google_ai_api_key
-GEMINI_MODEL=gemini-2.5-flash
-GEMINI_API_BASE=https://generativelanguage.googleapis.com/v1
+GROK_API_KEY=your_grok_api_key
+GROK_MODEL=grok-3-mini
+GROK_API_BASE=https://api.x.ai/v1
 ```
 
 4. Run backend
@@ -139,10 +139,11 @@ npm run preview
   - Uses `VITE_API_BASE_URL` (default: `http://localhost:5000/api`)
   - You can set `VITE_API_BASE_URL=/api` and use Vite dev proxy (`VITE_BACKEND_URL`)
 - Voice input uses browser `MediaRecorder` + backend `/api/test/stt`.
-- If Gemini or MongoDB env values are missing, backend routes will fail.
+- Grok REST is used for text generation/evaluation. Voice STT/TTS routes currently return `501` with guidance.
+- If Grok or MongoDB env values are missing, backend routes will fail.
 
 ## Troubleshooting
-- `GOOGLE_AI_API_KEY is not set`
+- `GROK_API_KEY is not set`
   - Ensure `backend/.env` exists and backend was restarted.
 - MongoDB connection error
   - Verify `MONGO_URI` is valid and database is reachable.

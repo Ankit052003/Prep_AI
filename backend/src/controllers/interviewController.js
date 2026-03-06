@@ -1,5 +1,6 @@
 const Interview = require("../models/Interview");
 const { generateQuestions, evaluateAnswer } = require("../services/aiService");
+const { primeTtsCache } = require("./testController");
 const mongoose = require("mongoose");
 
 const INTERVIEW_DOMAINS = [
@@ -14,7 +15,7 @@ const INTERVIEW_DOMAINS = [
 const DOMAIN_LOOKUP = new Map(
   INTERVIEW_DOMAINS.map((domain) => [domain.toLowerCase(), domain])
 );
-const DEFAULT_QUESTION_COUNT = 5;
+const DEFAULT_QUESTION_COUNT = 1;
 const MIN_QUESTION_COUNT = 1;
 const MAX_QUESTION_COUNT = 20;
 
@@ -97,6 +98,15 @@ function normalizeQuestionCount(rawQuestionCount) {
   return roundedCount;
 }
 
+function warmQuestionSpeech(question) {
+  const normalizedQuestion = typeof question === "string" ? question.trim() : "";
+  if (!normalizedQuestion) {
+    return;
+  }
+
+  primeTtsCache(normalizedQuestion);
+}
+
 exports.startInterview = async (req, res) => {
   try {
     const body = getRequestBody(req);
@@ -135,7 +145,11 @@ exports.startInterview = async (req, res) => {
       });
     }
 
+    warmQuestionSpeech(questions[0]);
+    warmQuestionSpeech(questions[1]);
+
     const interview = await Interview.create({
+      user: req.user?.userId || undefined,
       resumeData: parsedResume,
       domain: selectedDomain || "General",
       questions,
@@ -227,6 +241,11 @@ exports.submitAnswer = async (req, res) => {
     await interview.save();
 
     if (interview.currentQuestionIndex < interview.questions.length) {
+      const nextQuestion = interview.questions[interview.currentQuestionIndex];
+      const lookaheadQuestion = interview.questions[interview.currentQuestionIndex + 1];
+      warmQuestionSpeech(nextQuestion);
+      warmQuestionSpeech(lookaheadQuestion);
+
       res.json({
         question: currentQuestion,
         answer,
@@ -234,7 +253,7 @@ exports.submitAnswer = async (req, res) => {
         evaluation,
         evaluationDetails: evaluationResult || null,
         totalQuestions: interview.questions.length,
-        nextQuestion: interview.questions[interview.currentQuestionIndex],
+        nextQuestion,
       });
     } else {
       res.json({

@@ -1,6 +1,7 @@
 const fs = require("fs");
 const pdfParseModule = require("pdf-parse");
 const { parseResume } = require("../services/resumeParserService");
+const Resume = require("../models/Resume");
 
 async function extractPdfText(dataBuffer) {
   if (typeof pdfParseModule === "function") {
@@ -29,7 +30,8 @@ async function extractPdfText(dataBuffer) {
 function isTransientAiError(errorMessage = "") {
   if (!errorMessage) return false;
 
-  return /Gemini API\s*(429|500|502|503|504)/i.test(errorMessage) ||
+  return /(xAI|Groq) API\s*(429|500|502|503|504)/i.test(errorMessage) ||
+    /Groq STT failed/i.test(errorMessage) ||
     /(ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|timeout)/i.test(errorMessage);
 }
 
@@ -63,10 +65,20 @@ exports.uploadResume = async (req, res) => {
       warning = "AI resume parsing is temporarily unavailable. Showing extracted resume text instead.";
     }
 
+    const userId = req.user?.userId;
+    if (userId) {
+      await Resume.findOneAndUpdate(
+        { user: userId },
+        { user: userId, parsedData },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+    }
+
     res.json({
       message: "Resume processed successfully",
       parsedData,
       warning,
+      savedForUser: Boolean(userId),
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -74,5 +86,44 @@ exports.uploadResume = async (req, res) => {
     if (filePath) {
       fs.unlink(filePath, () => {});
     }
+  }
+};
+
+exports.getMyResume = async (req, res) => {
+  try {
+    const userId = req.user?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Authentication required." });
+    }
+
+    const savedResume = await Resume.findOne({ user: userId }).lean();
+    if (!savedResume) {
+      return res.status(404).json({ error: "No saved resume found for this user." });
+    }
+
+    return res.json({
+      parsedData: savedResume.parsedData,
+      updatedAt: savedResume.updatedAt,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+exports.deleteMyResume = async (req, res) => {
+  try {
+    const userId = req.user?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Authentication required." });
+    }
+
+    const deletedResume = await Resume.findOneAndDelete({ user: userId });
+    if (!deletedResume) {
+      return res.status(404).json({ error: "No saved resume found for this user." });
+    }
+
+    return res.json({ message: "Saved resume deleted successfully." });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
   }
 };

@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import ThemeToggleButton from "../components/ThemeToggleButton";
+import AuthProfileMenu from "../components/AuthProfileMenu";
 
 const INTERVIEW_HISTORY_KEY = "interviewHistory";
 const SAMPLE_WEAK_TOPICS = [
@@ -419,6 +420,7 @@ function ReportPage() {
           <button type="button" className="home-signin" onClick={() => navigate("/interview")}>
             Retake
           </button>
+          <AuthProfileMenu />
           <ThemeToggleButton />
         </div>
       </nav>

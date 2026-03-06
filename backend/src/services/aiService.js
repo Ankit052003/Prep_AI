@@ -1,46 +1,33 @@
-const axios = require("axios");
+const { chatCompletionWithFallback } = require("./xaiClient");
 
-const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-const apiBase =
-  process.env.GEMINI_API_BASE || "https://generativelanguage.googleapis.com/v1";
-const apiKey = process.env.GOOGLE_AI_API_KEY;
+const DEFAULT_GROK_MODEL = process.env.GROK_MODEL || "grok-3-mini";
+const DEFAULT_TIMEOUT_MS = 30000;
 const SCORE_REGEX = /(?:^|\b)(10|[0-9](?:\.[0-9])?)(?:\s*\/\s*10)?(?:\b|$)/;
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
-async function callGemini(prompt) {
-  if (!apiKey) {
-    throw new Error("GOOGLE_AI_API_KEY is not set");
+async function callGrok(prompt, options = {}) {
+  const promptText = String(prompt || "").trim();
+  if (!promptText) {
+    throw new Error("Prompt is required for Grok generation.");
   }
 
-  try {
-    const response = await axios.post(
-      `${apiBase}/models/${model}:generateContent?key=${apiKey}`,
+  return chatCompletionWithFallback({
+    preferredModel: options.model || DEFAULT_GROK_MODEL,
+    messages: [
       {
-        contents: [{ parts: [{ text: prompt }] }],
+        role: "system",
+        content:
+          "You are a precise AI interview assistant. Follow the user instruction exactly and return concise output.",
       },
-      {
-        timeout: 30000,
-      }
-    );
-
-    const text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!text) {
-      throw new Error("Gemini response did not contain text output");
-    }
-
-    return text;
-  } catch (error) {
-    const status = error.response?.status;
-    const apiMessage = error.response?.data?.error?.message;
-    throw new Error(
-      status
-        ? `Gemini API ${status}: ${apiMessage || error.message}`
-        : `Gemini API error: ${error.message}`
-    );
-  }
+      { role: "user", content: promptText },
+    ],
+    temperature: options.temperature ?? 0.2,
+    maxTokens: options.maxTokens,
+    timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS,
+  });
 }
 
 function resumeToPromptText(parsedResume) {
@@ -190,12 +177,12 @@ function normalizeEvaluation(parsed, fallbackRawText) {
   };
 }
 
-exports.generateQuestions = async (parsedResume, domain, questionCount = 5) => {
+exports.generateQuestions = async (parsedResume, domain, questionCount = 1) => {
   const selectedDomain =
     typeof domain === "string" && domain.trim() ? domain.trim() : "General";
   const totalQuestions = Number.isFinite(Number(questionCount))
     ? Math.max(1, Math.floor(Number(questionCount)))
-    : 5;
+    : 1;
 
   const domainInstructions =
     selectedDomain === "HR Interview"
@@ -222,7 +209,10 @@ exports.generateQuestions = async (parsedResume, domain, questionCount = 5) => {
   ${resumeToPromptText(parsedResume)}
   `;
 
-  return callGemini(prompt);
+  return callGrok(prompt, {
+    temperature: 0.2,
+    maxTokens: Math.max(400, totalQuestions * 120),
+  });
 };
 
 exports.evaluateAnswer = async (question, answer, context = {}) => {
@@ -269,7 +259,10 @@ Return STRICT JSON only:
 }
   `;
 
-  const rawEvaluation = await callGemini(prompt);
+  const rawEvaluation = await callGrok(prompt, {
+    temperature: 0.1,
+    maxTokens: 1200,
+  });
   const parsedEvaluation = parseJsonObject(rawEvaluation);
   return normalizeEvaluation(parsedEvaluation, rawEvaluation);
 };

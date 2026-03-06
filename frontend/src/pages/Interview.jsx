@@ -1,12 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
+import Skeleton, { SkeletonTheme } from "react-loading-skeleton";
+import "react-loading-skeleton/dist/skeleton.css";
 import API from "../services/api";
 import ThemeToggleButton from "../components/ThemeToggleButton";
+import AuthProfileMenu from "../components/AuthProfileMenu";
+import { isAuthenticated } from "../services/auth";
 
-const DEFAULT_QUESTION_COUNT = 5;
+const DEFAULT_QUESTION_COUNT = 1;
 const MIN_QUESTION_COUNT = 1;
 const MAX_QUESTION_COUNT = 20;
+const EMPLOYEE_INTRODUCTION_DOMAIN = "Employee Introduction";
 const DOMAIN_STORAGE_KEY = "selectedInterviewDomain";
 const QUESTION_COUNT_STORAGE_KEY = "selectedInterviewQuestionCount";
 const INTERVIEW_HISTORY_KEY = "interviewHistory";
@@ -16,20 +21,36 @@ const INTERVIEW_DOMAINS = [
   "Data Structures",
   "HR Interview",
   "System Design",
-  "Employee Introduction",
+  EMPLOYEE_INTRODUCTION_DOMAIN,
 ];
 const FILLER_WORD_PATTERN = /\b(um+|umm+|uh+|uhh+)\b/gi;
 const MAX_INTERVIEW_HISTORY_ITEMS = 30;
+const LIVE_WAVEFORM_BAR_COUNT = 14;
+const MAX_TTS_CACHE_ITEMS = 24;
+const TTS_REQUEST_TIMEOUT_MS = 7000;
+const TTS_SOFT_WAIT_MS = 1600;
+const PREFERRED_TTS_VOICE_NAMES = [
+  "Google US English",
+  "Microsoft Aria",
+  "Microsoft Jenny",
+  "Samantha",
+  "Alex",
+];
+const IDLE_WAVEFORM_BARS = Array.from({ length: LIVE_WAVEFORM_BAR_COUNT }, (_, index) => {
+  const midpoint = (LIVE_WAVEFORM_BAR_COUNT - 1) / 2;
+  const distanceFromCenter = Math.abs(index - midpoint);
+  return Math.round(8 + Math.max(0, 12 - distanceFromCenter * 2.8));
+});
 const fadeUp = {
-  hidden: { opacity: 0, y: 28 },
+  hidden: { opacity: 0, y: 18 },
   show: { opacity: 1, y: 0 },
 };
 const pageStagger = {
   hidden: {},
   show: {
     transition: {
-      delayChildren: 0.04,
-      staggerChildren: 0.08,
+      delayChildren: 0.02,
+      staggerChildren: 0.05,
     },
   },
 };
@@ -99,6 +120,51 @@ function getInitialQuestionCount() {
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
+}
+
+function createIdleWaveformBars() {
+  return [...IDLE_WAVEFORM_BARS];
+}
+
+function getVoiceIntensityLabel(level) {
+  if (level >= 65) {
+    return "Strong";
+  }
+  if (level >= 35) {
+    return "Active";
+  }
+  if (level >= 12) {
+    return "Light";
+  }
+  return "Quiet";
+}
+
+function pickPreferredSpeechVoice(voices) {
+  const englishVoices = voices.filter((voice) => /^en(-|_)/i.test(String(voice?.lang || "")));
+  const candidates = englishVoices.length ? englishVoices : voices;
+
+  for (const preferredName of PREFERRED_TTS_VOICE_NAMES) {
+    const matchedVoice = candidates.find((voice) =>
+      String(voice?.name || "").toLowerCase().includes(preferredName.toLowerCase())
+    );
+    if (matchedVoice) {
+      return matchedVoice;
+    }
+  }
+
+  return candidates[0] || null;
+}
+
+function decodeBase64ToArrayBuffer(base64Value) {
+  const normalizedBase64 = String(base64Value || "").replace(/\s+/g, "");
+  const binaryString = window.atob(normalizedBase64);
+  const bytes = new Uint8Array(binaryString.length);
+
+  for (let index = 0; index < binaryString.length; index += 1) {
+    bytes[index] = binaryString.charCodeAt(index);
+  }
+
+  return bytes.buffer;
 }
 
 function countWords(text) {
@@ -258,6 +324,18 @@ function InterviewPage() {
   const recorderRef = useRef(null);
   const streamRef = useRef(null);
   const chunksRef = useRef([]);
+  const audioContextRef = useRef(null);
+  const analyserRef = useRef(null);
+  const frequencyDataRef = useRef(null);
+  const animationFrameRef = useRef(null);
+  const speechRetryTimerRef = useRef(null);
+  const speechVoiceRef = useRef(null);
+  const ttsAudioRef = useRef(null);
+  const speechRequestIdRef = useRef(0);
+  const questionAudioContextRef = useRef(null);
+  const questionAudioSourceRef = useRef(null);
+  const ttsCacheRef = useRef(new Map());
+  const ttsInFlightRef = useRef(new Map());
 
   const [parsedResume] = useState(() => parseStoredData(localStorage.getItem("parsedResume")));
   const [interviewId, setInterviewId] = useState("");
@@ -268,6 +346,7 @@ function InterviewPage() {
   const [history, setHistory] = useState([]);
   const [lastResult, setLastResult] = useState(null);
   const [recording, setRecording] = useState(false);
+  const [isProcessingVoice, setIsProcessingVoice] = useState(false);
   const [autoReadQuestion, setAutoReadQuestion] = useState(true);
   const [autoSubmitVoice, setAutoSubmitVoice] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
@@ -280,15 +359,339 @@ function InterviewPage() {
   const [totalQuestions, setTotalQuestions] = useState(DEFAULT_QUESTION_COUNT);
   const [activeInterviewDomain, setActiveInterviewDomain] = useState("");
   const [pendingVoiceMetrics, setPendingVoiceMetrics] = useState(null);
+  const [liveWaveformBars, setLiveWaveformBars] = useState(() => createIdleWaveformBars());
+  const [voiceIntensityLevel, setVoiceIntensityLevel] = useState(0);
 
   const answeredCount = history.length;
   const progressPercent =
     totalQuestions > 0 ? Math.min((answeredCount / totalQuestions) * 100, 100) : 0;
   const hasActiveQuestion = Boolean(interviewId && currentQuestion);
-  const canSubmit = Boolean(answerText.trim()) && hasActiveQuestion && !isSubmitting;
   const interviewCompleted = Boolean(interviewId && !currentQuestion && answeredCount > 0);
+  const voiceUiBusy = recording || isProcessingVoice;
+  const canSubmit =
+    Boolean(answerText.trim()) && hasActiveQuestion && !isSubmitting && !voiceUiBusy;
+  const showQuestionSkeleton = Boolean(
+    parsedResume &&
+      ((isStarting && !hasActiveQuestion) ||
+        (interviewId && !currentQuestion && !interviewCompleted))
+  );
+
+  const clearSpeechRetryTimer = () => {
+    if (speechRetryTimerRef.current) {
+      window.clearTimeout(speechRetryTimerRef.current);
+      speechRetryTimerRef.current = null;
+    }
+  };
+
+  const cacheQuestionTts = (text, entry) => {
+    const normalizedText = String(text || "").trim();
+    if (!normalizedText || !entry?.audioBase64) {
+      return;
+    }
+
+    const cache = ttsCacheRef.current;
+    cache.set(normalizedText, entry);
+
+    while (cache.size > MAX_TTS_CACHE_ITEMS) {
+      const oldestKey = cache.keys().next().value;
+      if (!oldestKey) {
+        break;
+      }
+      cache.delete(oldestKey);
+    }
+  };
+
+  const fetchQuestionTtsData = async (text) => {
+    const normalizedText = String(text || "").trim();
+    if (!normalizedText) {
+      throw new Error("Missing question text for TTS.");
+    }
+
+    const cachedEntry = ttsCacheRef.current.get(normalizedText);
+    if (cachedEntry?.audioBase64) {
+      return cachedEntry;
+    }
+
+    const inFlight = ttsInFlightRef.current.get(normalizedText);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const requestPromise = API.post(
+      "/test/tts",
+      { text: normalizedText },
+      { timeout: TTS_REQUEST_TIMEOUT_MS }
+    )
+      .then((response) => {
+        const audioBase64 = String(response.data?.audioBase64 || "").trim();
+        const mimeType = String(response.data?.mimeType || "audio/wav").trim() || "audio/wav";
+
+        if (!audioBase64) {
+          throw new Error("AI TTS returned empty audio.");
+        }
+
+        const entry = {
+          audioBase64,
+          mimeType,
+          audioBuffer: null,
+          audioDataUrl: null,
+        };
+        cacheQuestionTts(normalizedText, entry);
+        return entry;
+      })
+      .finally(() => {
+        const activePromise = ttsInFlightRef.current.get(normalizedText);
+        if (activePromise === requestPromise) {
+          ttsInFlightRef.current.delete(normalizedText);
+        }
+      });
+
+    ttsInFlightRef.current.set(normalizedText, requestPromise);
+    return requestPromise;
+  };
+
+  const ensureTtsDataUrl = (entry) => {
+    if (!entry?.audioBase64) {
+      return "";
+    }
+
+    if (entry.audioDataUrl) {
+      return entry.audioDataUrl;
+    }
+
+    const mimeType = String(entry.mimeType || "audio/wav").trim() || "audio/wav";
+    entry.audioDataUrl = `data:${mimeType};base64,${entry.audioBase64}`;
+    return entry.audioDataUrl;
+  };
+
+  const ensureDecodedTtsBuffer = async (entry, playbackContext) => {
+    if (!entry?.audioBase64 || !playbackContext) {
+      return null;
+    }
+
+    if (entry.audioBuffer) {
+      return entry.audioBuffer;
+    }
+
+    const audioBufferData = decodeBase64ToArrayBuffer(entry.audioBase64);
+    const decodedAudioBuffer = await playbackContext.decodeAudioData(audioBufferData.slice(0));
+    entry.audioBuffer = decodedAudioBuffer;
+    return decodedAudioBuffer;
+  };
+
+  const prefetchQuestionTts = (text) => {
+    const normalizedText = String(text || "").trim();
+    if (!normalizedText) {
+      return;
+    }
+
+    void fetchQuestionTtsData(normalizedText)
+      .then(async (entry) => {
+        const playbackContext = await ensureQuestionPlaybackContext();
+        if (!playbackContext) {
+          return;
+        }
+
+        await ensureDecodedTtsBuffer(entry, playbackContext);
+      })
+      .catch(() => {});
+  };
+
+  const ensureQuestionPlaybackContext = async () => {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) {
+      return null;
+    }
+
+    if (!questionAudioContextRef.current) {
+      questionAudioContextRef.current = new AudioContextClass();
+    }
+
+    const playbackContext = questionAudioContextRef.current;
+    if (playbackContext.state === "suspended") {
+      await playbackContext.resume();
+    }
+
+    return playbackContext;
+  };
+
+  const stopQuestionPlayback = () => {
+    clearSpeechRetryTimer();
+
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+
+    const activeSource = questionAudioSourceRef.current;
+    if (activeSource) {
+      try {
+        activeSource.stop(0);
+      } catch (_error) {
+        // No-op
+      }
+      if (typeof activeSource.disconnect === "function") {
+        activeSource.disconnect();
+      }
+      questionAudioSourceRef.current = null;
+    }
+
+    const currentAudio = ttsAudioRef.current;
+    if (currentAudio) {
+      try {
+        currentAudio.pause();
+        currentAudio.src = "";
+      } catch (_error) {
+        // No-op
+      }
+      ttsAudioRef.current = null;
+    }
+  };
+
+  const resolveSpeechVoice = () => {
+    if (!("speechSynthesis" in window)) {
+      return null;
+    }
+
+    const availableVoices = window.speechSynthesis.getVoices();
+    if (!availableVoices.length) {
+      return speechVoiceRef.current;
+    }
+
+    const selectedVoice = pickPreferredSpeechVoice(availableVoices);
+    speechVoiceRef.current = selectedVoice;
+    return selectedVoice;
+  };
+
+  const warmUpSpeechSynthesis = () => {
+    if (!("speechSynthesis" in window)) {
+      return;
+    }
+
+    try {
+      const synth = window.speechSynthesis;
+      const warmupUtterance = new SpeechSynthesisUtterance(" ");
+      warmupUtterance.volume = 0;
+      synth.speak(warmupUtterance);
+      synth.cancel();
+      synth.resume();
+    } catch (_error) {
+      // Ignore warm-up failures; normal speak flow still runs.
+    }
+  };
+
+  const warmUpQuestionPlayback = () => {
+    ensureQuestionPlaybackContext().catch(() => {});
+  };
+
+  const stopAudioMonitoring = () => {
+    if (animationFrameRef.current) {
+      window.cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+
+    analyserRef.current = null;
+    frequencyDataRef.current = null;
+
+    if (audioContextRef.current) {
+      audioContextRef.current.close().catch(() => {});
+      audioContextRef.current = null;
+    }
+
+    setLiveWaveformBars(createIdleWaveformBars());
+    setVoiceIntensityLevel(0);
+  };
+
+  const startAudioMonitoring = (stream) => {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) {
+      setLiveWaveformBars(createIdleWaveformBars());
+      setVoiceIntensityLevel(0);
+      return;
+    }
+
+    try {
+      stopAudioMonitoring();
+
+      const audioContext = new AudioContextClass();
+      const analyser = audioContext.createAnalyser();
+      const source = audioContext.createMediaStreamSource(stream);
+
+      analyser.fftSize = 128;
+      analyser.minDecibels = -92;
+      analyser.maxDecibels = -12;
+      analyser.smoothingTimeConstant = 0.78;
+      const frequencyData = new Uint8Array(analyser.frequencyBinCount);
+      source.connect(analyser);
+
+      audioContextRef.current = audioContext;
+      analyserRef.current = analyser;
+      frequencyDataRef.current = frequencyData;
+
+      if (audioContext.state === "suspended") {
+        audioContext.resume().catch(() => {});
+      }
+
+      let lastPaintTime = 0;
+      const paintWaveform = (timestamp) => {
+        const activeAnalyser = analyserRef.current;
+        const activeFrequencyData = frequencyDataRef.current;
+        if (!activeAnalyser || !activeFrequencyData) {
+          return;
+        }
+
+        animationFrameRef.current = window.requestAnimationFrame(paintWaveform);
+        if (timestamp - lastPaintTime < 60) {
+          return;
+        }
+        lastPaintTime = timestamp;
+
+        activeAnalyser.getByteFrequencyData(activeFrequencyData);
+        const binsPerBar = Math.max(
+          1,
+          Math.floor(activeFrequencyData.length / LIVE_WAVEFORM_BAR_COUNT)
+        );
+        const nextBars = Array.from({ length: LIVE_WAVEFORM_BAR_COUNT }, (_, index) => {
+          const startIndex = index * binsPerBar;
+          const endIndex =
+            index === LIVE_WAVEFORM_BAR_COUNT - 1
+              ? activeFrequencyData.length
+              : Math.min(activeFrequencyData.length, startIndex + binsPerBar);
+
+          let total = 0;
+          for (let dataIndex = startIndex; dataIndex < endIndex; dataIndex += 1) {
+            total += activeFrequencyData[dataIndex];
+          }
+
+          const averageValue = total / Math.max(1, endIndex - startIndex);
+          const normalizedValue = averageValue / 255;
+          return clamp(Math.round(8 + normalizedValue * 36), 8, 44);
+        });
+
+        const averageBarHeight =
+          nextBars.reduce((sum, barHeight) => sum + barHeight, 0) / nextBars.length;
+        const normalizedLevel = (averageBarHeight - 8) / 36;
+
+        setLiveWaveformBars(nextBars);
+        setVoiceIntensityLevel(clamp(Math.round(normalizedLevel * 100), 0, 100));
+      };
+
+      animationFrameRef.current = window.requestAnimationFrame(paintWaveform);
+    } catch (_error) {
+      stopAudioMonitoring();
+    }
+  };
+
+  useEffect(() => {
+    if (isAuthenticated()) {
+      return;
+    }
+
+    navigate("/signup?mode=login&redirect=/interview", { replace: true });
+  }, [navigate]);
 
   const releaseMicResources = () => {
+    stopAudioMonitoring();
+
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
@@ -297,27 +700,215 @@ function InterviewPage() {
     recorderRef.current = null;
     chunksRef.current = [];
     setRecording(false);
+    setIsProcessingVoice(false);
   };
 
-  const speakQuestion = (text = currentQuestion) => {
-    if (!text) return;
-
+  const speakQuestionWithBrowserTTS = (normalizedText, requestId) => {
     if (!("speechSynthesis" in window)) {
       setStatusMessage("Speech playback is not supported in this browser.");
       return;
     }
 
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = "en-US";
-    window.speechSynthesis.speak(utterance);
+    const synth = window.speechSynthesis;
+    const voice = resolveSpeechVoice();
+    const utterance = new SpeechSynthesisUtterance(normalizedText);
+    utterance.lang = voice?.lang || "en-US";
+
+    if (voice) {
+      utterance.voice = voice;
+    }
+
+    utterance.onerror = () => {
+      if (speechRequestIdRef.current !== requestId) {
+        return;
+      }
+
+      clearSpeechRetryTimer();
+      speechRetryTimerRef.current = window.setTimeout(() => {
+        if (speechRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        const retryUtterance = new SpeechSynthesisUtterance(normalizedText);
+        const retryVoice = resolveSpeechVoice();
+        retryUtterance.lang = retryVoice?.lang || "en-US";
+        if (retryVoice) {
+          retryUtterance.voice = retryVoice;
+        }
+
+        synth.cancel();
+        synth.resume();
+        synth.speak(retryUtterance);
+      }, 220);
+    };
+
+    clearSpeechRetryTimer();
+    synth.cancel();
+    synth.resume();
+    synth.speak(utterance);
+
+    speechRetryTimerRef.current = window.setTimeout(() => {
+      if (speechRequestIdRef.current !== requestId) {
+        return;
+      }
+
+      if (!synth.speaking && !synth.pending) {
+        const fallbackUtterance = new SpeechSynthesisUtterance(normalizedText);
+        const fallbackVoice = resolveSpeechVoice();
+        fallbackUtterance.lang = fallbackVoice?.lang || "en-US";
+        if (fallbackVoice) {
+          fallbackUtterance.voice = fallbackVoice;
+        }
+
+        synth.cancel();
+        synth.resume();
+        synth.speak(fallbackUtterance);
+      }
+    }, 280);
+  };
+
+  const getQuestionTtsWithSoftWait = async (normalizedText, timeoutMs) => {
+    const ttsPromise = fetchQuestionTtsData(normalizedText);
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      const entry = await ttsPromise;
+      return { timedOut: false, entry };
+    }
+
+    let timeoutId = null;
+    const timeoutPromise = new Promise((resolve) => {
+      timeoutId = window.setTimeout(() => {
+        resolve({ timedOut: true, ttsPromise });
+      }, timeoutMs);
+    });
+
+    const ttsResult = await Promise.race([
+      ttsPromise.then((entry) => ({ timedOut: false, entry })),
+      timeoutPromise,
+    ]);
+
+    if (timeoutId !== null) {
+      window.clearTimeout(timeoutId);
+    }
+
+    return ttsResult;
+  };
+
+  const speakQuestion = async (text = currentQuestion, options = {}) => {
+    const { allowSoftFallback = false } = options;
+    const normalizedText = String(text || "").trim();
+    if (!normalizedText) return;
+
+    const requestId = speechRequestIdRef.current + 1;
+    speechRequestIdRef.current = requestId;
+    stopQuestionPlayback();
+
+    try {
+      let ttsEntry;
+      if (allowSoftFallback) {
+        const ttsResult = await getQuestionTtsWithSoftWait(normalizedText, TTS_SOFT_WAIT_MS);
+        if (speechRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        if (ttsResult?.timedOut) {
+          const delayedPromise = ttsResult.ttsPromise;
+          if (delayedPromise && typeof delayedPromise.then === "function") {
+            void delayedPromise
+              .then((entry) => {
+                void ensureQuestionPlaybackContext()
+                  .then((playbackContext) => {
+                    if (!playbackContext) {
+                      return;
+                    }
+                    return ensureDecodedTtsBuffer(entry, playbackContext);
+                  })
+                  .catch(() => {});
+              })
+              .catch(() => {});
+          }
+
+          speakQuestionWithBrowserTTS(normalizedText, requestId);
+          return;
+        }
+
+        ttsEntry = ttsResult.entry;
+      } else {
+        ttsEntry = await fetchQuestionTtsData(normalizedText);
+      }
+
+      if (speechRequestIdRef.current !== requestId) {
+        return;
+      }
+
+      const dataUrl = ensureTtsDataUrl(ttsEntry);
+      if (!dataUrl) {
+        throw new Error("AI TTS did not return playable audio.");
+      }
+
+      const audio = new Audio(dataUrl);
+      audio.preload = "auto";
+      ttsAudioRef.current = audio;
+      await audio.play();
+
+      void ensureQuestionPlaybackContext()
+        .then((playbackContext) => {
+          if (!playbackContext) {
+            return;
+          }
+          return ensureDecodedTtsBuffer(ttsEntry, playbackContext);
+        })
+        .catch(() => {});
+    } catch (_ttsError) {
+      if (speechRequestIdRef.current !== requestId) {
+        return;
+      }
+
+      speakQuestionWithBrowserTTS(normalizedText, requestId);
+    }
   };
 
   useEffect(() => {
-    if (autoReadQuestion && currentQuestion) {
-      speakQuestion(currentQuestion);
+    if (!autoReadQuestion || !currentQuestion) {
+      return;
     }
-  }, [autoReadQuestion, currentQuestion]);
+
+    void speakQuestion(currentQuestion, { allowSoftFallback: true });
+  }, [autoReadQuestion, currentQuestion, questionNumber]);
+
+  useEffect(() => {
+    if (!currentQuestion) {
+      return;
+    }
+
+    prefetchQuestionTts(currentQuestion);
+  }, [currentQuestion]);
+
+  useEffect(() => {
+    if (!("speechSynthesis" in window)) {
+      return undefined;
+    }
+
+    const synth = window.speechSynthesis;
+    const hydrateVoices = () => {
+      resolveSpeechVoice();
+    };
+
+    hydrateVoices();
+
+    if (typeof synth.addEventListener === "function") {
+      synth.addEventListener("voiceschanged", hydrateVoices);
+      return () => {
+        synth.removeEventListener("voiceschanged", hydrateVoices);
+      };
+    }
+
+    const previousHandler = synth.onvoiceschanged;
+    synth.onvoiceschanged = hydrateVoices;
+
+    return () => {
+      synth.onvoiceschanged = previousHandler || null;
+    };
+  }, []);
 
   useEffect(() => {
     localStorage.setItem(DOMAIN_STORAGE_KEY, selectedDomain);
@@ -328,9 +919,21 @@ function InterviewPage() {
   }, [selectedQuestionCount]);
 
   useEffect(() => {
+    if (selectedDomain === EMPLOYEE_INTRODUCTION_DOMAIN) {
+      setSelectedQuestionCount(1);
+    }
+  }, [selectedDomain]);
+
+  useEffect(() => {
     return () => {
-      if ("speechSynthesis" in window) {
-        window.speechSynthesis.cancel();
+      clearSpeechRetryTimer();
+      stopQuestionPlayback();
+      ttsInFlightRef.current.clear();
+      ttsCacheRef.current.clear();
+
+      if (questionAudioContextRef.current) {
+        questionAudioContextRef.current.close().catch(() => {});
+        questionAudioContextRef.current = null;
       }
 
       const activeRecorder = recorderRef.current;
@@ -341,12 +944,22 @@ function InterviewPage() {
     };
   }, []);
 
+  const handleDomainChange = (event) => {
+    const nextDomain = event.target.value;
+    setSelectedDomain(nextDomain);
+  };
+
   const startInterview = async () => {
     if (!parsedResume) {
       setError("Upload and parse your resume before starting an interview.");
       return;
     }
 
+    stopQuestionPlayback();
+    ttsInFlightRef.current.clear();
+    ttsCacheRef.current.clear();
+    warmUpSpeechSynthesis();
+    warmUpQuestionPlayback();
     setIsStarting(true);
     setError("");
     setStatusMessage("");
@@ -373,12 +986,16 @@ function InterviewPage() {
         MIN_QUESTION_COUNT,
         MAX_QUESTION_COUNT
       );
+      const firstQuestion = String(response.data?.question || "").trim();
 
       setInterviewId(response.data?.interviewId || "");
       setActiveInterviewDomain(activeDomain);
       setTotalQuestions(generatedCount);
-      setCurrentQuestion(response.data?.question || "");
-      setQuestionNumber(response.data?.question ? 1 : 0);
+      if (firstQuestion) {
+        prefetchQuestionTts(firstQuestion);
+      }
+      setCurrentQuestion(firstQuestion);
+      setQuestionNumber(firstQuestion ? 1 : 0);
       setStatusMessage(
         `Interview started for ${activeDomain} with ${generatedCount} questions. Submit your answer to move to the next question.`
       );
@@ -428,9 +1045,11 @@ function InterviewPage() {
       setAnswerText("");
       setPendingVoiceMetrics(null);
 
-      if (response.data?.nextQuestion) {
+      const nextQuestionText = String(response.data?.nextQuestion || "").trim();
+      if (nextQuestionText) {
         const nextQuestionNumber = Math.min(questionNumber + 1, totalQuestions);
-        setCurrentQuestion(response.data.nextQuestion);
+        prefetchQuestionTts(nextQuestionText);
+        setCurrentQuestion(nextQuestionText);
         setQuestionNumber(nextQuestionNumber);
         setStatusMessage(`Answer saved. Continue with question ${nextQuestionNumber}.`);
       } else {
@@ -513,6 +1132,9 @@ function InterviewPage() {
       streamRef.current = stream;
       recorderRef.current = mediaRecorder;
       chunksRef.current = [];
+      setPendingVoiceMetrics(null);
+      setIsProcessingVoice(false);
+      startAudioMonitoring(stream);
 
       mediaRecorder.ondataavailable = (event) => {
         if (event.data?.size) {
@@ -527,6 +1149,10 @@ function InterviewPage() {
 
       mediaRecorder.onstop = async () => {
         try {
+          setRecording(false);
+          setIsProcessingVoice(true);
+          stopAudioMonitoring();
+
           const audioBlob = new Blob(chunksRef.current, { type: "audio/webm" });
           if (!audioBlob.size) {
             setError("No audio captured. Please record again.");
@@ -582,6 +1208,14 @@ function InterviewPage() {
             return;
           }
 
+          if (status === 501) {
+            setError(
+              backendMessage ||
+                "Voice transcription is not available for the current AI provider. Switch to text mode for now."
+            );
+            return;
+          }
+
           const message = backendMessage || voiceError.message || "Voice processing failed.";
           setError(`Voice processing failed at ${endpoint}${status ? ` (${status})` : ""}: ${message}`);
         } finally {
@@ -591,7 +1225,7 @@ function InterviewPage() {
 
       mediaRecorder.start();
       setRecording(true);
-      setStatusMessage("Recording started. Click stop when you are done.");
+      setStatusMessage("Recording started. Speak now and watch the waveform for mic activity.");
     } catch (recordingError) {
       const message =
         recordingError.response?.data?.error ||
@@ -608,6 +1242,9 @@ function InterviewPage() {
 
     if (recorder.state !== "inactive") {
       setStatusMessage("Recording stopped. Processing answer...");
+      setRecording(false);
+      setIsProcessingVoice(true);
+      stopAudioMonitoring();
       recorder.stop();
     }
   };
@@ -633,6 +1270,7 @@ function InterviewPage() {
           <button type="button" className="home-signin" onClick={() => navigate("/report")}>
             Open Report
           </button>
+          <AuthProfileMenu />
           <ThemeToggleButton />
         </div>
       </nav>
@@ -716,8 +1354,8 @@ function InterviewPage() {
                 <select
                   id="interview-domain"
                   value={selectedDomain}
-                  onChange={(event) => setSelectedDomain(event.target.value)}
-                  disabled={isStarting || isSubmitting || recording}
+                  onChange={handleDomainChange}
+                  disabled={isStarting || isSubmitting || voiceUiBusy}
                 >
                   {INTERVIEW_DOMAINS.map((domain) => (
                     <option key={domain} value={domain}>
@@ -743,7 +1381,7 @@ function InterviewPage() {
                       : DEFAULT_QUESTION_COUNT;
                     setSelectedQuestionCount(nextValue);
                   }}
-                  disabled={isStarting || isSubmitting || recording}
+                  disabled={isStarting || isSubmitting || voiceUiBusy}
                 />
                 <p className="muted-copy domain-helper">
                   Choose between {MIN_QUESTION_COUNT} and {MAX_QUESTION_COUNT} questions.
@@ -751,7 +1389,7 @@ function InterviewPage() {
               </div>
 
               <div className="app-button-row">
-                <button type="button" className="app-btn" onClick={startInterview} disabled={isStarting || isSubmitting || recording}>
+                <button type="button" className="app-btn" onClick={startInterview} disabled={isStarting || isSubmitting || voiceUiBusy}>
                   {isStarting ? "Starting..." : interviewId ? "Restart Interview" : "Start Interview"}
                 </button>
 
@@ -759,13 +1397,37 @@ function InterviewPage() {
                   type="button"
                   className="app-btn secondary"
                   onClick={finishInterview}
-                  disabled={!interviewId || !answeredCount || isFinishing || isSubmitting}
+                  disabled={!interviewId || !answeredCount || isFinishing || isSubmitting || voiceUiBusy}
                 >
                   {isFinishing ? "Finishing..." : "Finish Interview"}
                 </button>
               </div>
 
               <AnimatePresence initial={false}>
+                {showQuestionSkeleton && (
+                  <motion.div
+                    className="question-shell question-skeleton-shell"
+                    initial={{ opacity: 0, y: 16 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -10 }}
+                    transition={{ duration: 0.3, ease: "easeOut" }}
+                  >
+                    <p className="question-label">Loading question...</p>
+                    <SkeletonTheme
+                      baseColor="rgba(170, 190, 230, 0.28)"
+                      highlightColor="rgba(255, 255, 255, 0.56)"
+                    >
+                      <div className="question-skeleton-lines" aria-hidden="true">
+                        <Skeleton height={22} width="92%" borderRadius={8} />
+                        <Skeleton height={22} width="84%" borderRadius={8} />
+                        <Skeleton height={22} width="74%" borderRadius={8} />
+                      </div>
+                      <Skeleton height={46} width="100%" borderRadius={10} />
+                      <Skeleton height={122} width="100%" borderRadius={12} />
+                    </SkeletonTheme>
+                  </motion.div>
+                )}
+
                 {hasActiveQuestion && (
                   <motion.div
                     className="question-shell"
@@ -778,7 +1440,12 @@ function InterviewPage() {
                   <h3>{currentQuestion}</h3>
 
                   <div className="app-inline-controls">
-                    <button type="button" className="app-btn ghost" onClick={() => speakQuestion()}>
+                    <button
+                      type="button"
+                      className="app-btn ghost"
+                      onClick={() => speakQuestion()}
+                      disabled={voiceUiBusy}
+                    >
                       Read Question
                     </button>
                     <label className="inline-toggle">
@@ -786,6 +1453,7 @@ function InterviewPage() {
                         type="checkbox"
                         checked={autoReadQuestion}
                         onChange={(event) => setAutoReadQuestion(event.target.checked)}
+                        disabled={voiceUiBusy}
                       />
                       Auto Read
                     </label>
@@ -798,6 +1466,7 @@ function InterviewPage() {
                         value="text"
                         checked={answerMode === "text"}
                         onChange={(event) => setAnswerMode(event.target.value)}
+                        disabled={voiceUiBusy}
                       />
                       Text
                     </label>
@@ -807,37 +1476,91 @@ function InterviewPage() {
                         value="voice"
                         checked={answerMode === "voice"}
                         onChange={(event) => setAnswerMode(event.target.value)}
+                        disabled={voiceUiBusy}
                       />
                       Voice
                     </label>
                   </div>
 
                   {answerMode === "voice" && (
-                    <div className="app-button-row">
-                      {!recording ? (
-                        <button
-                          type="button"
-                          className="app-btn secondary"
-                          onClick={startRecording}
-                          disabled={isSubmitting}
-                        >
-                          Start Recording
-                        </button>
-                      ) : (
-                        <button type="button" className="app-btn danger" onClick={stopRecording}>
-                          Stop Recording
-                        </button>
-                      )}
+                    <>
+                      <div className="app-button-row">
+                        {!recording ? (
+                          <button
+                            type="button"
+                            className="app-btn secondary"
+                            onClick={startRecording}
+                            disabled={isSubmitting || isProcessingVoice}
+                          >
+                            {isProcessingVoice ? "Processing..." : "Start Recording"}
+                          </button>
+                        ) : (
+                          <button type="button" className="app-btn danger" onClick={stopRecording}>
+                            Stop Recording
+                          </button>
+                        )}
 
-                      <label className="inline-toggle">
-                        <input
-                          type="checkbox"
-                          checked={autoSubmitVoice}
-                          onChange={(event) => setAutoSubmitVoice(event.target.checked)}
-                        />
-                        Auto Submit Transcript
-                      </label>
-                    </div>
+                        <label className="inline-toggle">
+                          <input
+                            type="checkbox"
+                            checked={autoSubmitVoice}
+                            onChange={(event) => setAutoSubmitVoice(event.target.checked)}
+                            disabled={voiceUiBusy}
+                          />
+                          Auto Submit Transcript
+                        </label>
+                      </div>
+
+                      <AnimatePresence initial={false}>
+                        {recording && (
+                          <motion.div
+                            className="recording-wave-shell"
+                            initial={{ opacity: 0, y: 10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: -8 }}
+                            transition={{ duration: 0.22, ease: "easeOut" }}
+                          >
+                            <div className="recording-wave-meta">
+                              <span className="recording-wave-title">
+                                <span className="recording-wave-dot" aria-hidden="true" />
+                                Recording
+                              </span>
+                              <span className="recording-wave-status">
+                                {getVoiceIntensityLabel(voiceIntensityLevel)} {voiceIntensityLevel}%
+                              </span>
+                            </div>
+
+                            <div className="recording-wave-track">
+                              <div
+                                className="recording-wave"
+                                role="img"
+                                aria-label={`Microphone is recording. Current voice intensity is ${voiceIntensityLevel} percent.`}
+                              >
+                                {liveWaveformBars.map((barHeight, index) => (
+                                  <span
+                                    key={`recording-wave-${index}`}
+                                    style={{
+                                      "--bar-size": `${barHeight}px`,
+                                      opacity: clamp(0.25 + barHeight / 55, 0.3, 1),
+                                    }}
+                                  />
+                                ))}
+                              </div>
+                            </div>
+
+                            <p className="recording-wave-caption">
+                              Live mic waveform reacts to your voice.
+                            </p>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+
+                      {isProcessingVoice && !recording && (
+                        <p className="recording-processing-note">
+                          Voice captured. Converting your answer to text now.
+                        </p>
+                      )}
+                    </>
                   )}
 
                   <textarea
@@ -846,6 +1569,7 @@ function InterviewPage() {
                     className="app-textarea"
                     rows={5}
                     placeholder="Type your answer here or record in voice mode."
+                    disabled={voiceUiBusy}
                   />
 
                   <AnimatePresence initial={false}>
@@ -882,7 +1606,7 @@ function InterviewPage() {
                       type="button"
                       className="app-btn ghost"
                       onClick={() => setAnswerText("")}
-                      disabled={!answerText}
+                      disabled={!answerText || voiceUiBusy}
                     >
                       Clear
                     </button>
@@ -997,6 +1721,7 @@ function InterviewPage() {
             </motion.article>
           </motion.section>
         )}
+
       </main>
     </div>
   );

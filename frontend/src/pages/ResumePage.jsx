@@ -1,8 +1,10 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import API from "../services/api";
 import ThemeToggleButton from "../components/ThemeToggleButton";
+import AuthProfileMenu from "../components/AuthProfileMenu";
+import { getStoredUser, isAuthenticated, subscribeAuthChanges } from "../services/auth";
 
 const revealUp = {
   hidden: { opacity: 0, y: 40 },
@@ -55,11 +57,38 @@ function getSectionValue(parsedResume, key) {
   return null;
 }
 
+function stringifyPreviewValue(value) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => stringifyPreviewValue(item))
+      .filter(Boolean)
+      .join(", ");
+  }
+
+  if (typeof value === "object") {
+    return Object.entries(value)
+      .map(([key, item]) => {
+        const normalized = stringifyPreviewValue(item);
+        return normalized ? `${key}: ${normalized}` : "";
+      })
+      .filter(Boolean)
+      .join(" | ");
+  }
+
+  return String(value).trim();
+}
+
 function sectionToItems(value) {
   if (!value) return [];
 
   if (Array.isArray(value)) {
-    return value.map((item) => String(item).trim()).filter(Boolean);
+    return value
+      .map((item) => stringifyPreviewValue(item))
+      .filter(Boolean);
   }
 
   if (typeof value === "string") {
@@ -70,10 +99,12 @@ function sectionToItems(value) {
   }
 
   if (typeof value === "object") {
-    return Object.entries(value).map(([label, item]) => {
-      if (typeof item === "string") return `${label}: ${item}`;
-      return `${label}: ${JSON.stringify(item)}`;
-    });
+    return Object.entries(value)
+      .map(([label, item]) => {
+        const normalized = stringifyPreviewValue(item);
+        return normalized ? `${label}: ${normalized}` : "";
+      })
+      .filter(Boolean);
   }
 
   return [];
@@ -83,8 +114,10 @@ function ResumePage() {
   const navigate = useNavigate();
   const [file, setFile] = useState(null);
   const [uploading, setUploading] = useState(false);
+  const [deletingSavedResume, setDeletingSavedResume] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [loggedInUser, setLoggedInUser] = useState(() => getStoredUser());
   const [parsedResume, setParsedResume] = useState(() => {
     const saved = localStorage.getItem("parsedResume");
     if (!saved) return null;
@@ -120,6 +153,44 @@ function ResumePage() {
       },
     ].filter((section) => section.items.length);
   }, [parsedResume]);
+
+  const isLoggedIn = Boolean(loggedInUser);
+
+  useEffect(() => subscribeAuthChanges(() => setLoggedInUser(getStoredUser())), []);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadSavedResume = async () => {
+      if (!isLoggedIn) {
+        return;
+      }
+
+      try {
+        const response = await API.get("/resume/me");
+        const normalized = parseResumePayload(response.data?.parsedData);
+        if (!normalized || !isMounted) {
+          return;
+        }
+
+        setParsedResume((currentResume) => currentResume || normalized);
+        if (!localStorage.getItem("parsedResume")) {
+          localStorage.setItem("parsedResume", JSON.stringify(normalized));
+        }
+      } catch (savedResumeError) {
+        const status = savedResumeError?.response?.status;
+        if (status === 401 || status === 404) {
+          return;
+        }
+      }
+    };
+
+    loadSavedResume();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isLoggedIn]);
 
   const handleFileSelect = (event) => {
     const selectedFile = event.target.files?.[0];
@@ -170,10 +241,13 @@ function ResumePage() {
       localStorage.setItem("parsedResume", JSON.stringify(normalized));
       localStorage.removeItem("finalResult");
       setParsedResume(normalized);
+      const saveSuffix = response.data?.savedForUser
+        ? " Resume is linked to your logged-in profile."
+        : " Please login before interview to continue.";
       setSuccess(
         response.data?.warning
-          ? `Resume uploaded successfully. ${response.data.warning}`
-          : "Resume uploaded and parsed successfully."
+          ? `Resume uploaded successfully. ${response.data.warning}${saveSuffix}`
+          : `Resume uploaded and parsed successfully.${saveSuffix}`
       );
     } catch (uploadError) {
       const message =
@@ -195,6 +269,45 @@ function ResumePage() {
     localStorage.removeItem("finalResult");
   };
 
+  const handleDeleteSavedResume = async () => {
+    if (!isLoggedIn) {
+      setError("Please login to delete a saved resume from your profile.");
+      return;
+    }
+
+    setDeletingSavedResume(true);
+    setError("");
+
+    try {
+      await API.delete("/resume/me");
+      setFile(null);
+      setParsedResume(null);
+      localStorage.removeItem("parsedResume");
+      localStorage.removeItem("finalResult");
+      setSuccess("Saved resume deleted from your profile.");
+    } catch (deleteError) {
+      const message =
+        deleteError.response?.data?.error ||
+        deleteError.message ||
+        "Unable to delete saved resume.";
+      setError(message);
+    } finally {
+      setDeletingSavedResume(false);
+    }
+  };
+
+  const goToInterviewWithAuthCheck = () => {
+    if (isAuthenticated()) {
+      navigate("/interview");
+      return;
+    }
+
+    setError("Please login before starting the interview. Redirecting to login...");
+    setTimeout(() => {
+      navigate("/signup?mode=login&redirect=/interview");
+    }, 450);
+  };
+
   return (
     <div className="home-shell app-shell">
       <nav className="home-navbar">
@@ -213,9 +326,10 @@ function ResumePage() {
         </div>
 
         <div className="nav-actions">
-          <button type="button" className="home-signin" onClick={() => navigate("/interview")}>
+          <button type="button" className="home-signin" onClick={goToInterviewWithAuthCheck}>
             Go To Interview
           </button>
+          <AuthProfileMenu />
           <ThemeToggleButton />
         </div>
       </nav>
@@ -258,12 +372,22 @@ function ResumePage() {
               <button type="button" className="app-btn" onClick={handleUpload} disabled={uploading}>
                 {uploading ? "Uploading..." : "Upload Resume"}
               </button>
-              <button type="button" className="app-btn secondary" onClick={() => navigate("/interview")} disabled={!parsedResume}>
+              <button type="button" className="app-btn secondary" onClick={goToInterviewWithAuthCheck} disabled={!parsedResume}>
                 Continue
               </button>
               <button type="button" className="app-btn ghost" onClick={handleReset}>
                 Reset
               </button>
+              {isLoggedIn ? (
+                <button
+                  type="button"
+                  className="app-btn danger"
+                  onClick={handleDeleteSavedResume}
+                  disabled={deletingSavedResume}
+                >
+                  {deletingSavedResume ? "Deleting..." : "Delete Saved Resume"}
+                </button>
+              ) : null}
             </div>
 
             {error && <p className="app-alert error">{error}</p>}

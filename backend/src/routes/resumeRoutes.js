@@ -2,7 +2,12 @@ const express = require("express");
 const multer = require("multer");
 const fs = require("fs");
 const path = require("path");
-const { uploadResume } = require("../controllers/resumeController");
+const {
+  uploadResume,
+  getMyResume,
+  deleteMyResume,
+} = require("../controllers/resumeController");
+const { optionalAuth, requireAuth } = require("../middleware/authMiddleware");
 
 const router = express.Router();
 const uploadsDir = path.resolve(__dirname, "../../uploads");
@@ -19,6 +24,8 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage });
 
-router.post("/upload", upload.single("resume"), uploadResume);
+router.post("/upload", optionalAuth, upload.single("resume"), uploadResume);
+router.get("/me", requireAuth, getMyResume);
+router.delete("/me", requireAuth, deleteMyResume);
 
 module.exports = router;

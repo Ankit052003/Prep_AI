@@ -9,14 +9,15 @@ const {
   finishInterview,
 } = require("../controllers/interviewController");
 const { testSTT } = require("../controllers/testController");
+const { optionalAuth } = require("../middleware/authMiddleware");
 
 const router = express.Router();
 const uploadsDir = path.resolve(__dirname, "../../uploads");
 fs.mkdirSync(uploadsDir, { recursive: true });
 const upload = multer({ dest: uploadsDir });
 
-router.post("/start", startInterview);
-router.post("/generate", startInterview);
+router.post("/start", optionalAuth, startInterview);
+router.post("/generate", optionalAuth, startInterview);
 router.post("/answer", submitAnswer);
 router.post("/:interviewId/answer", submitAnswer);
 router.post("/evaluate", evaluateSingleAnswer);

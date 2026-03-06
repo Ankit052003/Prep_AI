@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import ThemeToggleButton from "../components/ThemeToggleButton";
+import AuthProfileMenu from "../components/AuthProfileMenu";
 
 const timelineSteps = [
   {
@@ -87,6 +88,7 @@ const TYPE_SPEED_MS = 48;
 const ERASE_SPEED_MS = 28;
 const QUESTION_HOLD_MS = 1350;
 const SCORE_SWAP_MS = 2400;
+const HERO_VIDEO_SOURCE = "/homepage.mp4";
 const revealUp = {
   hidden: { opacity: 0, y: 40 },
   show: { opacity: 1, y: 0 },
@@ -104,10 +106,12 @@ const revealViewport = { once: true, amount: 0.2 };
 
 function Home() {
   const navigate = useNavigate();
+  const heroVideoRef = useRef(null);
   const [typedQuestion, setTypedQuestion] = useState("");
   const [activeQuestionIndex, setActiveQuestionIndex] = useState(0);
   const [isErasing, setIsErasing] = useState(false);
   const [activeScoreIndex, setActiveScoreIndex] = useState(0);
+  const [heroVideoUnavailable, setHeroVideoUnavailable] = useState(false);
 
   useEffect(() => {
     const scoreTimerId = window.setInterval(() => {
@@ -152,6 +156,180 @@ function Home() {
     return () => window.clearTimeout(typingTimerId);
   }, [activeQuestionIndex, isErasing, typedQuestion]);
 
+  useEffect(() => {
+    const videoElement = heroVideoRef.current;
+
+    if (!videoElement || heroVideoUnavailable) {
+      return undefined;
+    }
+
+    if (
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ) {
+      return undefined;
+    }
+
+    const canvasElement = document.createElement("canvas");
+    const FRAME_WIDTH = 72;
+    const FRAME_HEIGHT = 40;
+    canvasElement.width = FRAME_WIDTH;
+    canvasElement.height = FRAME_HEIGHT;
+
+    const frameContext = canvasElement.getContext("2d", { willReadFrequently: true });
+    if (!frameContext) {
+      return undefined;
+    }
+
+    const MOTION_PIXEL_THRESHOLD = 18;
+    const MOTION_SUM_THRESHOLD = 5000;
+    const SAMPLE_INTERVAL_MS = 85;
+    const MIN_FOCUS_X = 22;
+    const MAX_FOCUS_X = 78;
+    const MIN_FOCUS_Y = 20;
+    const MAX_FOCUS_Y = 80;
+
+    let previousFrame = null;
+    let animationFrameId = 0;
+    let lastSampleTimestamp = 0;
+    let smoothedFocusX = 50;
+    let smoothedFocusY = 50;
+    let analysisDisabled = false;
+
+    const applyFocus = () => {
+      videoElement.style.setProperty("--hero-video-focus-x", `${smoothedFocusX.toFixed(1)}%`);
+      videoElement.style.setProperty("--hero-video-focus-y", `${smoothedFocusY.toFixed(1)}%`);
+    };
+
+    const resetFocus = () => {
+      smoothedFocusX = 50;
+      smoothedFocusY = 50;
+      applyFocus();
+    };
+
+    const animate = (timestamp) => {
+      animationFrameId = window.requestAnimationFrame(animate);
+
+      if (
+        analysisDisabled ||
+        videoElement.readyState < 2 ||
+        videoElement.paused ||
+        videoElement.ended ||
+        timestamp - lastSampleTimestamp < SAMPLE_INTERVAL_MS
+      ) {
+        return;
+      }
+
+      lastSampleTimestamp = timestamp;
+
+      try {
+        frameContext.drawImage(videoElement, 0, 0, FRAME_WIDTH, FRAME_HEIGHT);
+        const currentFrameData = frameContext.getImageData(0, 0, FRAME_WIDTH, FRAME_HEIGHT).data;
+
+        if (!previousFrame) {
+          previousFrame = new Uint8ClampedArray(currentFrameData);
+          return;
+        }
+
+        let motionWeightSum = 0;
+        let weightedXSum = 0;
+        let weightedYSum = 0;
+
+        for (let pixelOffset = 0; pixelOffset < currentFrameData.length; pixelOffset += 4) {
+          const redDiff = Math.abs(currentFrameData[pixelOffset] - previousFrame[pixelOffset]);
+          const greenDiff = Math.abs(
+            currentFrameData[pixelOffset + 1] - previousFrame[pixelOffset + 1]
+          );
+          const blueDiff = Math.abs(
+            currentFrameData[pixelOffset + 2] - previousFrame[pixelOffset + 2]
+          );
+          const diffStrength = (redDiff + greenDiff + blueDiff) / 3;
+
+          if (diffStrength < MOTION_PIXEL_THRESHOLD) {
+            continue;
+          }
+
+          const pixelIndex = pixelOffset / 4;
+          const pixelX = pixelIndex % FRAME_WIDTH;
+          const pixelY = Math.floor(pixelIndex / FRAME_WIDTH);
+
+          motionWeightSum += diffStrength;
+          weightedXSum += pixelX * diffStrength;
+          weightedYSum += pixelY * diffStrength;
+        }
+
+        previousFrame.set(currentFrameData);
+
+        if (motionWeightSum < MOTION_SUM_THRESHOLD) {
+          smoothedFocusX = smoothedFocusX * 0.9 + 50 * 0.1;
+          smoothedFocusY = smoothedFocusY * 0.9 + 50 * 0.1;
+          applyFocus();
+          return;
+        }
+
+        const motionCenterX = weightedXSum / motionWeightSum;
+        const motionCenterY = weightedYSum / motionWeightSum;
+
+        const normalizedX = ((motionCenterX / (FRAME_WIDTH - 1)) - 0.5) * 2;
+        const normalizedY = ((motionCenterY / (FRAME_HEIGHT - 1)) - 0.5) * 2;
+
+        const targetFocusX = Math.max(
+          MIN_FOCUS_X,
+          Math.min(MAX_FOCUS_X, 50 + normalizedX * 28)
+        );
+        const targetFocusY = Math.max(
+          MIN_FOCUS_Y,
+          Math.min(MAX_FOCUS_Y, 50 + normalizedY * 28)
+        );
+
+        smoothedFocusX = smoothedFocusX * 0.76 + targetFocusX * 0.24;
+        smoothedFocusY = smoothedFocusY * 0.76 + targetFocusY * 0.24;
+
+        applyFocus();
+      } catch (_error) {
+        analysisDisabled = true;
+        resetFocus();
+      }
+    };
+
+    const startAnimation = () => {
+      if (animationFrameId) {
+        return;
+      }
+
+      animationFrameId = window.requestAnimationFrame(animate);
+    };
+
+    const stopAnimation = () => {
+      if (!animationFrameId) {
+        return;
+      }
+
+      window.cancelAnimationFrame(animationFrameId);
+      animationFrameId = 0;
+    };
+
+    const handlePlay = () => startAnimation();
+    const handlePause = () => stopAnimation();
+
+    videoElement.addEventListener("play", handlePlay);
+    videoElement.addEventListener("pause", handlePause);
+    videoElement.addEventListener("ended", handlePause);
+
+    if (!videoElement.paused && !videoElement.ended) {
+      startAnimation();
+    }
+
+    return () => {
+      stopAnimation();
+      videoElement.removeEventListener("play", handlePlay);
+      videoElement.removeEventListener("pause", handlePause);
+      videoElement.removeEventListener("ended", handlePause);
+      resetFocus();
+    };
+  }, [heroVideoUnavailable]);
+
   const activeScore = liveScoreSnapshots[activeScoreIndex];
 
   return (
@@ -179,13 +357,7 @@ function Home() {
         </div>
 
         <div className="nav-actions">
-          <button
-            type="button"
-            onClick={() => navigate("/signup")}
-            className="home-signin"
-          >
-            Sign Up
-          </button>
+          <AuthProfileMenu />
           <ThemeToggleButton />
         </div>
       </nav>
@@ -237,11 +409,25 @@ function Home() {
             <div className="hero-ring ring-inner" aria-hidden="true" />
 
             <div className="hero-photo-shell">
-              <img
-                src="https://images.unsplash.com/photo-1603415526960-f7e0328c63b1?auto=format&fit=crop&w=900&q=80"
-                alt="Candidate practicing an interview"
-                className="hero-photo"
-              />
+              {!heroVideoUnavailable ? (
+                <video
+                  ref={heroVideoRef}
+                  className="hero-photo hero-photo-video"
+                  autoPlay
+                  muted
+                  loop
+                  playsInline
+                  onError={() => setHeroVideoUnavailable(true)}
+                >
+                  <source src={HERO_VIDEO_SOURCE} type="video/mp4" />
+                </video>
+              ) : (
+                <img
+                  src="https://images.unsplash.com/photo-1603415526960-f7e0328c63b1?auto=format&fit=crop&w=900&q=80"
+                  alt="Candidate practicing an interview"
+                  className="hero-photo"
+                />
+              )}
             </div>
 
             <article className="hero-card hero-metric">

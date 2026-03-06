@@ -1,4 +1,5 @@
 import axios from "axios";
+import { getAuthToken } from "./auth";
 
 function normalizeApiBaseUrl(rawBaseUrl) {
   const fallbackBaseUrl = "http://localhost:5000/api";
@@ -24,6 +25,22 @@ const normalizedBaseUrl = normalizeApiBaseUrl(configuredBaseUrl);
 const api = axios.create({
   baseURL: normalizedBaseUrl,
   timeout: 30000,
+});
+
+api.interceptors.request.use((config) => {
+  const token = getAuthToken();
+  if (!token) {
+    return config;
+  }
+
+  const nextConfig = { ...config };
+  nextConfig.headers = nextConfig.headers || {};
+
+  if (!nextConfig.headers.Authorization && !nextConfig.headers.authorization) {
+    nextConfig.headers.Authorization = `Bearer ${token}`;
+  }
+
+  return nextConfig;
 });
 
 api.interceptors.response.use(

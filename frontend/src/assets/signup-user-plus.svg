@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">Create Account</title>
+  <desc id="desc">User avatar with a plus symbol.</desc>
+  <path d="M12.5 31.6c-1.2-1.8-2-4.5-2-7.4 0-8 6.5-14.4 14.4-14.4 5.3 0 10.1 2.8 12.6 7.5-.6 0-1.4.2-2 .4-1.5.7-2.4 1.9-2.4 3.1 0 1.2.8 2.2 2.2 2.9.4 1.3.7 2.6.7 4.1 0 7.6-6.1 13.7-13.7 13.7-4 0-7.6-1.7-9.8-4.4z" fill="#c7746a"/>
+  <circle cx="22.7" cy="29.6" r="11.4" fill="#f3af8f"/>
+  <path d="M20.9 40.9h3.6v4.8c0 1.8-1.4 3.2-3.2 3.2h-.4c-1.8 0-3.2-1.4-3.2-3.2v-1.6c0-1.8 1.4-3.2 3.2-3.2z" fill="#f3af8f"/>
+  <path d="M2.6 58.7V54c0-6.5 5.2-11.7 11.7-11.7h17.3c6.5 0 11.7 5.2 11.7 11.7v4.7H2.6z" fill="#0f9b91"/>
+  <path d="M15.5 58.7v-4.3" stroke="#05233e" stroke-width="1.3" stroke-linecap="round"/>
+  <path d="M29.6 58.7v-4.3" stroke="#05233e" stroke-width="1.3" stroke-linecap="round"/>
+  <path d="M17.4 28.5c.8-1.2 2.1-2 3.5-2 1.4 0 2.7.8 3.4 2" stroke="#05233e" stroke-width="1.2" stroke-linecap="round" fill="none"/>
+  <path d="M24.2 28.5c.8-1.2 2.1-2 3.5-2 1.4 0 2.7.8 3.4 2" stroke="#05233e" stroke-width="1.2" stroke-linecap="round" fill="none"/>
+  <circle cx="20.8" cy="31.8" r="1.1" fill="#05233e"/>
+  <circle cx="28.6" cy="31.8" r="1.1" fill="#05233e"/>
+  <path d="M19.5 36.6c.9 1.1 2.1 1.7 3.2 1.7s2.3-.6 3.2-1.7" stroke="#05233e" stroke-width="1.2" stroke-linecap="round" fill="none"/>
+  <circle cx="46.2" cy="43.2" r="17.2" fill="#17bad8" stroke="#05233e" stroke-width="1.5"/>
+  <path d="M46.2 34.3v17.8M37.3 43.2h17.8" stroke="#ffc90a" stroke-width="5.2" stroke-linecap="round"/>
+  <path d="M46.2 34.3v17.8M37.3 43.2h17.8" stroke="#05233e" stroke-width="1.5" stroke-linecap="round"/>
+</svg>

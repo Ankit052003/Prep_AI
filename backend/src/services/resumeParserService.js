@@ -1,14 +1,7 @@
-const axios = require("axios");
+const { chatCompletionWithFallback } = require("./xaiClient");
 
 exports.parseResume = async (resumeText) => {
-  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-  const apiBase =
-    process.env.GEMINI_API_BASE || "https://generativelanguage.googleapis.com/v1";
-  const apiKey = process.env.GOOGLE_AI_API_KEY;
-
-  if (!apiKey) {
-    throw new Error("GOOGLE_AI_API_KEY is not set");
-  }
+  const model = process.env.GROK_MODEL || "grok-3-mini";
 
   const prompt = `
   Extract the following from this resume:
@@ -23,30 +16,18 @@ exports.parseResume = async (resumeText) => {
   Return JSON format.
   `;
 
-  try {
-    const response = await axios.post(
-      `${apiBase}/models/${model}:generateContent?key=${apiKey}`,
+  return chatCompletionWithFallback({
+    preferredModel: model,
+    messages: [
       {
-        contents: [{ parts: [{ text: prompt }] }],
+        role: "system",
+        content:
+          "You extract structured resume details. Return JSON when possible and do not add markdown fences.",
       },
-      {
-        timeout: 30000,
-      }
-    );
-
-    const text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!text) {
-      throw new Error("Gemini response did not contain text output");
-    }
-
-    return text;
-  } catch (error) {
-    const status = error.response?.status;
-    const apiMessage = error.response?.data?.error?.message;
-    throw new Error(
-      status
-        ? `Gemini API ${status}: ${apiMessage || error.message}`
-        : `Gemini API error: ${error.message}`
-    );
-  }
+      { role: "user", content: prompt },
+    ],
+    temperature: 0.1,
+    maxTokens: 1200,
+    timeoutMs: 30000,
+  });
 };
