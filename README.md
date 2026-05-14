@@ -269,3 +269,6 @@ This README intentionally omits API-key values/details.
 ## License
 
 MIT License. See [LICENSE](./LICENSE).
+
+## Author
+Ankit Kumar
