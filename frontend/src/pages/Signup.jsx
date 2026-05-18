@@ -8,7 +8,13 @@ import { getStoredUser, persistAuthSession, subscribeAuthChanges } from "../serv
 
 const SIGNUP_VIDEO_SOURCE = import.meta.env.VITE_SIGNUP_VIDEO_URL || "/signup-loop.mp4";
 const MIN_PASSWORD_LENGTH = 8;
-const GOOGLE_OAUTH_SCOPE = "openid email profile";
+const GOOGLE_BROWSER_CLIENT_ID = String(import.meta.env.VITE_GOOGLE_CLIENT_ID || "").trim();
+const GOOGLE_IDENTITY_SCRIPT_SRC = "https://accounts.google.com/gsi/client";
+const GOOGLE_SCRIPT_TIMEOUT_MS = 5000;
+const GOOGLE_BUTTON_FALLBACK_WIDTH = 240;
+const GOOGLE_BUTTON_MAX_WIDTH = 400;
+
+let googleIdentityScriptLoadPromise = null;
 
 function getPasswordStrength(password) {
   let strengthScore = 0;
@@ -46,6 +52,120 @@ function getSafeRedirectPath(rawRedirect) {
   return trimmedRedirect;
 }
 
+function getGoogleIdentityClient() {
+  return window.google?.accounts?.id;
+}
+
+function hasGoogleIdentityClient(client) {
+  return Boolean(client?.initialize && client?.renderButton);
+}
+
+function getGoogleButtonWidth(buttonElement) {
+  const measuredWidth = Math.floor(buttonElement.getBoundingClientRect().width);
+
+  if (!Number.isFinite(measuredWidth) || measuredWidth <= 0) {
+    return GOOGLE_BUTTON_FALLBACK_WIDTH;
+  }
+
+  return Math.min(GOOGLE_BUTTON_MAX_WIDTH, measuredWidth);
+}
+
+function loadGoogleIdentityClient() {
+  if (typeof window === "undefined" || typeof document === "undefined") {
+    return Promise.resolve(null);
+  }
+
+  const existingClient = getGoogleIdentityClient();
+  if (hasGoogleIdentityClient(existingClient)) {
+    return Promise.resolve(existingClient);
+  }
+
+  if (googleIdentityScriptLoadPromise) {
+    return googleIdentityScriptLoadPromise;
+  }
+
+  googleIdentityScriptLoadPromise = new Promise((resolve) => {
+    let isSettled = false;
+    let timeoutId = 0;
+
+    const finish = (client) => {
+      if (isSettled) {
+        return;
+      }
+
+      isSettled = true;
+      if (timeoutId) {
+        window.clearTimeout(timeoutId);
+      }
+      if (!client) {
+        googleIdentityScriptLoadPromise = null;
+      }
+
+      resolve(client);
+    };
+
+    const waitForClient = () => {
+      const startedAt = Date.now();
+
+      const poll = () => {
+        const googleIdentityClient = getGoogleIdentityClient();
+        if (hasGoogleIdentityClient(googleIdentityClient)) {
+          finish(googleIdentityClient);
+          return;
+        }
+
+        if (Date.now() - startedAt >= GOOGLE_SCRIPT_TIMEOUT_MS) {
+          finish(null);
+          return;
+        }
+
+        window.setTimeout(poll, 120);
+      };
+
+      poll();
+    };
+
+    const scriptElements = Array.from(document.querySelectorAll("script"));
+    let scriptElement = scriptElements.find((element) =>
+      String(element.src || "").startsWith(GOOGLE_IDENTITY_SCRIPT_SRC)
+    );
+
+    if (!scriptElement) {
+      scriptElement = document.createElement("script");
+      scriptElement.src = GOOGLE_IDENTITY_SCRIPT_SRC;
+      scriptElement.async = true;
+      scriptElement.defer = true;
+      document.head.appendChild(scriptElement);
+    }
+
+    scriptElement.addEventListener("load", waitForClient, { once: true });
+    scriptElement.addEventListener("error", () => finish(null), { once: true });
+    timeoutId = window.setTimeout(() => finish(null), GOOGLE_SCRIPT_TIMEOUT_MS);
+
+    waitForClient();
+  });
+
+  return googleIdentityScriptLoadPromise;
+}
+
+function getGoogleConfigRequestErrorMessage(requestError) {
+  const apiBaseUrl = String(api.defaults?.baseURL || "").trim();
+  const statusCode = Number(requestError?.response?.status);
+
+  if (Number.isFinite(statusCode)) {
+    if (statusCode === 404) {
+      return "Google sign-in config route was not found. Restart the backend so /api/auth/google/config is available.";
+    }
+
+    return (
+      requestError?.response?.data?.error ||
+      `Unable to load Google sign-in config from backend. Server returned HTTP ${statusCode}.`
+    );
+  }
+
+  return `Backend is not reachable at ${apiBaseUrl || "the configured API URL"}. Start or restart the backend, then try Google sign-in again.`;
+}
+
 function SignupPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -69,9 +189,13 @@ function SignupPage() {
   const [success, setSuccess] = useState("");
   const [videoUnavailable, setVideoUnavailable] = useState(false);
   const [loggedInUser, setLoggedInUser] = useState(() => getStoredUser());
-  const [googleClientId, setGoogleClientId] = useState(() =>
-    String(import.meta.env.VITE_GOOGLE_CLIENT_ID || "").trim()
-  );
+  const [googleClientId, setGoogleClientId] = useState("");
+  const [googleConfigError, setGoogleConfigError] = useState(null);
+  const [googleButtonError, setGoogleButtonError] = useState(null);
+  const [isGoogleButtonReady, setIsGoogleButtonReady] = useState(false);
+  const googleButtonProxyRef = useRef(null);
+  const googleCredentialHandlerRef = useRef(null);
+  const googleInitializedClientIdRef = useRef("");
   const googleConfigRequestedRef = useRef(false);
 
   useEffect(() => {
@@ -281,11 +405,20 @@ function SignupPage() {
         }
 
         const serverClientId = String(response?.data?.clientId || "").trim();
-        if (serverClientId) {
-          setGoogleClientId(serverClientId);
+        const nextClientId = serverClientId || GOOGLE_BROWSER_CLIENT_ID;
+        if (nextClientId) {
+          setGoogleClientId(nextClientId);
+          setGoogleConfigError(null);
         }
       })
-      .catch(() => {});
+      .catch((requestError) => {
+        if (isMounted) {
+          setGoogleConfigError(requestError);
+        }
+        if (isMounted && GOOGLE_BROWSER_CLIENT_ID) {
+          setGoogleClientId(GOOGLE_BROWSER_CLIENT_ID);
+        }
+      });
 
     return () => {
       isMounted = false;
@@ -326,50 +459,120 @@ function SignupPage() {
     setSearchParams(nextParams);
   };
 
-  const resolveGoogleClientId = async () => {
-    if (googleClientId) {
-      return googleClientId;
+  const handleGoogleCredential = async (credentialResponse) => {
+    const credential = String(credentialResponse?.credential || "").trim();
+    if (!credential) {
+      setError("Google sign-in did not return an ID token.");
+      setIsGoogleSubmitting(false);
+      return;
     }
 
     try {
-      const response = await api.get("/auth/google/config");
-      const serverClientId = String(response?.data?.clientId || "").trim();
+      setIsGoogleSubmitting(true);
 
-      if (serverClientId) {
-        setGoogleClientId(serverClientId);
-        return serverClientId;
+      const response = await api.post("/auth/google", { credential });
+      const authToken = response?.data?.token;
+      const googleUser = response?.data?.user;
+
+      if (!authToken || !googleUser) {
+        throw new Error("Google authentication response was incomplete.");
       }
-    } catch (_error) {
-      // Fallback to empty; caller handles user-facing message.
+
+      persistAuthSession(authToken, googleUser);
+      setLoggedInUser(getStoredUser());
+
+      const rememberedIdentifier = String(googleUser?.email || "").trim();
+      if (formData.rememberMe && rememberedIdentifier) {
+        window.localStorage.setItem("prepai-remember-identity", rememberedIdentifier);
+      }
+
+      setSuccess(`Google sign-in successful. Redirecting to ${redirectPath || "/resume"}...`);
+
+      window.setTimeout(() => {
+        navigate(redirectPath || "/resume");
+      }, 700);
+    } catch (requestError) {
+      const message =
+        requestError?.response?.data?.error ||
+        requestError?.message ||
+        "Unable to sign in with Google right now. Please try again.";
+      setError(message);
+    } finally {
+      setIsGoogleSubmitting(false);
+    }
+  };
+
+  googleCredentialHandlerRef.current = handleGoogleCredential;
+
+  useEffect(() => {
+    const buttonElement = googleButtonProxyRef.current;
+
+    if (!googleClientId) {
+      if (buttonElement) {
+        buttonElement.replaceChildren();
+      }
+      setIsGoogleButtonReady(false);
+      return undefined;
     }
 
-    return "";
-  };
+    if (!buttonElement) {
+      setIsGoogleButtonReady(false);
+      return undefined;
+    }
 
-  const waitForGoogleOauthClient = async (timeoutMs = 5000) => {
-    const startedAt = Date.now();
+    let isMounted = true;
+    buttonElement.replaceChildren();
+    setIsGoogleButtonReady(false);
+    setGoogleButtonError(null);
 
-    return new Promise((resolve) => {
-      const poll = () => {
-        const oauthClient = window.google?.accounts?.oauth2;
-        if (oauthClient?.initTokenClient) {
-          resolve(oauthClient);
+    loadGoogleIdentityClient()
+      .then((googleIdentityClient) => {
+        if (!isMounted) {
           return;
         }
 
-        if (Date.now() - startedAt >= timeoutMs) {
-          resolve(null);
+        if (!hasGoogleIdentityClient(googleIdentityClient)) {
+          setGoogleButtonError(new Error("Google sign-in script did not load."));
           return;
         }
 
-        window.setTimeout(poll, 120);
-      };
+        if (googleInitializedClientIdRef.current !== googleClientId) {
+          googleIdentityClient.initialize({
+            client_id: googleClientId,
+            callback: (credentialResponse) => {
+              googleCredentialHandlerRef.current?.(credentialResponse);
+            },
+          });
+          googleInitializedClientIdRef.current = googleClientId;
+        }
 
-      poll();
-    });
-  };
+        googleIdentityClient.renderButton(buttonElement, {
+          type: "standard",
+          theme: "outline",
+          size: "large",
+          text: "continue_with",
+          shape: "pill",
+          logo_alignment: "left",
+          width: getGoogleButtonWidth(buttonElement),
+        });
 
-  const handleGoogleAuth = async () => {
+        setIsGoogleButtonReady(true);
+      })
+      .catch((setupError) => {
+        if (!isMounted) {
+          return;
+        }
+
+        setGoogleButtonError(setupError);
+        setIsGoogleButtonReady(false);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [googleClientId]);
+
+  const handleGoogleAuth = () => {
     setError("");
     setSuccess("");
 
@@ -377,85 +580,23 @@ function SignupPage() {
       return;
     }
 
-    setIsGoogleSubmitting(true);
-
-    try {
-      const resolvedClientId = await resolveGoogleClientId();
-      if (!resolvedClientId) {
-        setError(
-          "Google sign-in is not configured. Set GOOGLE_CLIENT_ID on backend or VITE_GOOGLE_CLIENT_ID on frontend."
-        );
-        setIsGoogleSubmitting(false);
+    if (!googleClientId) {
+      if (googleConfigError && !GOOGLE_BROWSER_CLIENT_ID) {
+        setError(getGoogleConfigRequestErrorMessage(googleConfigError));
         return;
       }
 
-      const googleOauthClient = await waitForGoogleOauthClient();
-      if (!googleOauthClient) {
-        setError("Google sign-in script did not load. Refresh the page and try again.");
-        setIsGoogleSubmitting(false);
-        return;
-      }
+      setError("Google sign-in is still loading. Please try again in a moment.");
+      return;
+    }
 
-      const tokenClient = googleOauthClient.initTokenClient({
-        client_id: resolvedClientId,
-        scope: GOOGLE_OAUTH_SCOPE,
-        callback: async (tokenResponse) => {
-          try {
-            const googleError = String(tokenResponse?.error || "").trim();
-            const accessToken = String(tokenResponse?.access_token || "").trim();
+    if (googleButtonError) {
+      setError(googleButtonError?.message || "Google sign-in script did not load.");
+      return;
+    }
 
-            if (googleError) {
-              setError("Google sign-in was cancelled or blocked.");
-              return;
-            }
-
-            if (!accessToken) {
-              setError("Google sign-in did not return an access token.");
-              return;
-            }
-
-            const response = await api.post("/auth/google", { accessToken });
-            const authToken = response?.data?.token;
-            const googleUser = response?.data?.user;
-
-            persistAuthSession(authToken, googleUser);
-            setLoggedInUser(getStoredUser());
-
-            const rememberedIdentifier = String(googleUser?.email || "").trim();
-            if (formData.rememberMe && rememberedIdentifier) {
-              window.localStorage.setItem("prepai-remember-identity", rememberedIdentifier);
-            }
-
-            setSuccess(`Google sign-in successful. Redirecting to ${redirectPath || "/resume"}...`);
-
-            window.setTimeout(() => {
-              navigate(redirectPath || "/resume");
-            }, 700);
-          } catch (requestError) {
-            const message =
-              requestError?.response?.data?.error ||
-              requestError?.message ||
-              "Unable to sign in with Google right now. Please try again.";
-            setError(message);
-          } finally {
-            setIsGoogleSubmitting(false);
-          }
-        },
-        error_callback: () => {
-          setError("Google sign-in popup was closed or blocked.");
-          setIsGoogleSubmitting(false);
-        },
-      });
-
-      try {
-        tokenClient.requestAccessToken({ prompt: "select_account" });
-      } catch (_error) {
-        setError("Unable to open Google sign-in popup. Please allow popups and try again.");
-        setIsGoogleSubmitting(false);
-      }
-    } catch (_error) {
-      setError("Unable to start Google sign-in. Please try again.");
-      setIsGoogleSubmitting(false);
+    if (!isGoogleButtonReady) {
+      setError("Google sign-in is still loading. Please try again in a moment.");
     }
   };
 
@@ -608,39 +749,52 @@ function SignupPage() {
             ) : null}
 
             <div className="signup-socials">
-              <button
-                type="button"
-                className="signup-social-google"
-                onClick={handleGoogleAuth}
-                disabled={isSubmitting || isGoogleSubmitting}
-                aria-label="Continue with Google"
+              <div
+                className={`signup-google-button-shell${
+                  isSubmitting || isGoogleSubmitting ? " disabled" : ""
+                }`}
               >
-                <svg
-                  className="signup-social-google-icon"
-                  viewBox="0 0 256 262"
-                  xmlns="http://www.w3.org/2000/svg"
-                  aria-hidden="true"
-                  focusable="false"
+                <button
+                  type="button"
+                  className="signup-social-google"
+                  onClick={handleGoogleAuth}
+                  disabled={isSubmitting || isGoogleSubmitting}
+                  aria-label="Continue with Google"
                 >
-                  <path
-                    fill="#4285F4"
-                    d="M255.68 133.5c0-10.3-.84-20.66-2.65-30.82H130.7v58.35h70.07c-2.9 18.81-13.81 35.43-29.92 45.99v38.2h48.32c28.36-26.1 44.5-64.64 44.5-111.72Z"
-                  />
-                  <path
-                    fill="#34A853"
-                    d="M130.7 261.1c35.02 0 64.53-11.5 86.05-31.16l-48.32-38.2c-13.45 9.16-30.8 14.37-37.73 14.37-28.98 0-53.5-19.57-62.28-45.88H18.6v39.37C40.65 237.28 82.6 261.1 130.7 261.1Z"
-                  />
-                  <path
-                    fill="#FBBC05"
-                    d="M68.42 160.23c-2.24-6.62-3.52-13.72-3.52-20.98 0-7.27 1.28-14.37 3.52-20.99V78.9H18.6A130.96 130.96 0 0 0 0 139.25c0 21.12 5.04 41.12 18.6 60.35l49.82-39.37Z"
-                  />
-                  <path
-                    fill="#EA4335"
-                    d="M130.7 51.08c19.06 0 36.24 6.56 49.74 19.41l37.1-37.1C195.12 12.53 165.71 0 130.7 0 82.6 0 40.65 23.82 18.6 78.9l49.82 39.36c8.78-26.3 33.3-45.88 62.28-45.88Z"
-                  />
-                </svg>
-                <span>{isGoogleSubmitting ? "Connecting..." : "Continue with Google"}</span>
-              </button>
+                  <svg
+                    className="signup-social-google-icon"
+                    viewBox="0 0 256 262"
+                    xmlns="http://www.w3.org/2000/svg"
+                    aria-hidden="true"
+                    focusable="false"
+                  >
+                    <path
+                      fill="#4285F4"
+                      d="M255.68 133.5c0-10.3-.84-20.66-2.65-30.82H130.7v58.35h70.07c-2.9 18.81-13.81 35.43-29.92 45.99v38.2h48.32c28.36-26.1 44.5-64.64 44.5-111.72Z"
+                    />
+                    <path
+                      fill="#34A853"
+                      d="M130.7 261.1c35.02 0 64.53-11.5 86.05-31.16l-48.32-38.2c-13.45 9.16-30.8 14.37-37.73 14.37-28.98 0-53.5-19.57-62.28-45.88H18.6v39.37C40.65 237.28 82.6 261.1 130.7 261.1Z"
+                    />
+                    <path
+                      fill="#FBBC05"
+                      d="M68.42 160.23c-2.24-6.62-3.52-13.72-3.52-20.98 0-7.27 1.28-14.37 3.52-20.99V78.9H18.6A130.96 130.96 0 0 0 0 139.25c0 21.12 5.04 41.12 18.6 60.35l49.82-39.37Z"
+                    />
+                    <path
+                      fill="#EA4335"
+                      d="M130.7 51.08c19.06 0 36.24 6.56 49.74 19.41l37.1-37.1C195.12 12.53 165.71 0 130.7 0 82.6 0 40.65 23.82 18.6 78.9l49.82 39.36c8.78-26.3 33.3-45.88 62.28-45.88Z"
+                    />
+                  </svg>
+                  <span>{isGoogleSubmitting ? "Connecting..." : "Continue with Google"}</span>
+                </button>
+                <div
+                  ref={googleButtonProxyRef}
+                  className={`signup-google-button-proxy${
+                    isGoogleButtonReady && !isSubmitting && !isGoogleSubmitting ? "" : " loading"
+                  }`}
+                  aria-hidden="true"
+                />
+              </div>
             </div>
 
             <div className="signup-divider">

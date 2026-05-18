@@ -1,8 +1,19 @@
 import axios from "axios";
 import { getAuthToken } from "./auth";
 
+function getDefaultApiBaseUrl() {
+  if (typeof window !== "undefined") {
+    const hostname = window.location.hostname;
+    if (hostname === "localhost" || hostname === "127.0.0.1") {
+      return "http://localhost:5000/api";
+    }
+  }
+
+  return "https://ai-interview-backend-hff4.onrender.com/api";
+}
+
 function normalizeApiBaseUrl(rawBaseUrl) {
-  const fallbackBaseUrl = "https://ai-interview-backend-hff4.onrender.com";
+  const fallbackBaseUrl = getDefaultApiBaseUrl();
 
   if (!rawBaseUrl || typeof rawBaseUrl !== "string") {
     return fallbackBaseUrl;

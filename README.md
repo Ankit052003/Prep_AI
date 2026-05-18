@@ -105,6 +105,8 @@ Notes:
 - `POST /api/auth/signup` -> create account
 - `POST /api/auth/register` -> alias for signup
 - `POST /api/auth/login` -> login
+- `GET /api/auth/google/config` -> public Google sign-in browser client config
+- `POST /api/auth/google` -> Google sign-in/register with a Google ID token
 - `GET /api/auth/me` -> current user (requires Bearer token)
 
 ### Resume
@@ -231,6 +233,7 @@ This README intentionally omits API-key values/details.
 - Frontend supports optional env overrides for API base/proxy target/media URLs.
 - Vite proxy target defaults to `http://localhost:5000` in `frontend/vite.config.ts`.
 - Frontend API client default base is `http://localhost:5000/api` if no override is provided.
+- Google sign-in requires a Web OAuth client ID in backend `GOOGLE_CLIENT_ID`; use `GOOGLE_CLIENT_IDS` as a comma-separated list if multiple web clients share the backend. The frontend fetches this value from `/api/auth/google/config`, with `VITE_GOOGLE_CLIENT_ID` only as an optional browser-side fallback.
 
 ## Scripts
 

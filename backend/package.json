@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
+    "check:google": "node scripts/check-google-config.js",
     "check:routes": "node scripts/check-routes.js"
   },
   "license": "ISC",

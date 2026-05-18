@@ -4,7 +4,7 @@ const jwt = require("jsonwebtoken");
 const User = require("../models/User");
 
 const MIN_PASSWORD_LENGTH = 8;
-const GOOGLE_TOKEN_INFO_URL = "https://www.googleapis.com/oauth2/v3/tokeninfo";
+const GOOGLE_TOKEN_INFO_URL = "https://oauth2.googleapis.com/tokeninfo";
 const GOOGLE_USER_INFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo";
 
 function sanitizeIdentifier(rawIdentifier) {
@@ -42,8 +42,26 @@ function signAuthToken(userId) {
   return jwt.sign({ userId }, jwtSecret, { expiresIn: "7d" });
 }
 
+function splitGoogleClientIds(rawValue) {
+  return String(rawValue || "")
+    .split(",")
+    .map((clientId) => clientId.trim())
+    .filter(Boolean);
+}
+
+function getGoogleClientIds() {
+  return Array.from(
+    new Set([
+      ...splitGoogleClientIds(process.env.GOOGLE_CLIENT_ID),
+      ...splitGoogleClientIds(process.env.google_client_id),
+      ...splitGoogleClientIds(process.env.GOOGLE_CLIENT_IDS),
+      ...splitGoogleClientIds(process.env.google_client_ids),
+    ])
+  );
+}
+
 function getGoogleClientId() {
-  return String(process.env.GOOGLE_CLIENT_ID || "").trim();
+  return getGoogleClientIds()[0] || "";
 }
 
 function sanitizeName(rawName, fallbackValue = "Google User") {
@@ -57,8 +75,77 @@ function buildHttpError(message, status = 500) {
   return error;
 }
 
-async function fetchGoogleTokenInfo(accessToken) {
-  const endpoint = `${GOOGLE_TOKEN_INFO_URL}?access_token=${encodeURIComponent(accessToken)}`;
+function getGoogleTokenAudience(tokenInfo) {
+  return tokenInfo?.aud || tokenInfo?.audience || tokenInfo?.issued_to || "";
+}
+
+function isAllowedGoogleAudience(rawAudience, allowedClientIds) {
+  const audienceValues = Array.isArray(rawAudience)
+    ? rawAudience
+    : String(rawAudience || "").split(/[\s,]+/);
+
+  return audienceValues
+    .map((audience) => String(audience || "").trim())
+    .filter(Boolean)
+    .some((audience) => allowedClientIds.includes(audience));
+}
+
+function assertAllowedGoogleAudience(tokenInfo, allowedClientIds) {
+  const tokenAudience = getGoogleTokenAudience(tokenInfo);
+
+  if (!isAllowedGoogleAudience(tokenAudience, allowedClientIds)) {
+    throw buildHttpError("Google token audience mismatch.", 401);
+  }
+}
+
+function assertValidGoogleIssuer(tokenInfo) {
+  const issuer = String(tokenInfo?.iss || "");
+
+  if (issuer && issuer !== "accounts.google.com" && issuer !== "https://accounts.google.com") {
+    throw buildHttpError("Google token issuer mismatch.", 401);
+  }
+}
+
+function assertUnexpiredGoogleToken(tokenInfo) {
+  const expiresAtSeconds = Number(tokenInfo?.exp);
+
+  if (Number.isFinite(expiresAtSeconds) && expiresAtSeconds * 1000 <= Date.now()) {
+    throw buildHttpError("Google token has expired.", 401);
+  }
+}
+
+function isGoogleEmailVerified(rawValue) {
+  return rawValue === true || String(rawValue || "").toLowerCase() === "true";
+}
+
+function buildGoogleProfile(rawProfile) {
+  const googleId = String(rawProfile?.sub || "").trim();
+  const normalizedEmail = sanitizeIdentifier(rawProfile?.email);
+
+  if (!googleId) {
+    throw buildHttpError("Google account did not return a stable account id.", 401);
+  }
+
+  if (!normalizedEmail) {
+    throw buildHttpError(
+      "Google account does not expose a valid email. Please use another account.",
+      400
+    );
+  }
+
+  if (!isGoogleEmailVerified(rawProfile?.email_verified)) {
+    throw buildHttpError("Google email is not verified. Please verify email on Google first.", 401);
+  }
+
+  return {
+    googleId,
+    email: normalizedEmail,
+    name: sanitizeName(rawProfile?.name, normalizedEmail.split("@")[0]),
+  };
+}
+
+async function fetchGoogleTokenInfo(queryParams) {
+  const endpoint = `${GOOGLE_TOKEN_INFO_URL}?${queryParams.toString()}`;
   const response = await fetch(endpoint, { method: "GET" });
   const payload = await response.json().catch(() => null);
 
@@ -68,6 +155,16 @@ async function fetchGoogleTokenInfo(accessToken) {
   }
 
   return payload || {};
+}
+
+async function getGoogleProfileFromIdToken(idToken, allowedClientIds) {
+  const tokenInfo = await fetchGoogleTokenInfo(new URLSearchParams({ id_token: idToken }));
+
+  assertAllowedGoogleAudience(tokenInfo, allowedClientIds);
+  assertValidGoogleIssuer(tokenInfo);
+  assertUnexpiredGoogleToken(tokenInfo);
+
+  return buildGoogleProfile(tokenInfo);
 }
 
 async function fetchGoogleUserInfo(accessToken) {
@@ -86,6 +183,74 @@ async function fetchGoogleUserInfo(accessToken) {
   }
 
   return payload || {};
+}
+
+async function getGoogleProfileFromAccessToken(accessToken, allowedClientIds) {
+  const tokenInfo = await fetchGoogleTokenInfo(new URLSearchParams({ access_token: accessToken }));
+
+  assertAllowedGoogleAudience(tokenInfo, allowedClientIds);
+
+  const userInfo = await fetchGoogleUserInfo(accessToken);
+  return buildGoogleProfile({
+    ...userInfo,
+    sub: userInfo?.sub || tokenInfo?.sub,
+    email: userInfo?.email || tokenInfo?.email,
+    email_verified: userInfo?.email_verified ?? tokenInfo?.email_verified,
+  });
+}
+
+async function findOrCreateGoogleUser(googleProfile) {
+  let user = await User.findOne({ googleId: googleProfile.googleId });
+
+  if (!user) {
+    user = await User.findOne({ email: googleProfile.email });
+  }
+
+  if (!user) {
+    const randomSecret = crypto.randomBytes(24).toString("hex");
+    const hashedPassword = await bcrypt.hash(randomSecret, 10);
+
+    try {
+      return await User.create({
+        name: googleProfile.name,
+        email: googleProfile.email,
+        googleId: googleProfile.googleId,
+        password: hashedPassword,
+      });
+    } catch (createError) {
+      if (createError?.code !== 11000) {
+        throw createError;
+      }
+
+      user = await User.findOne({
+        $or: [{ googleId: googleProfile.googleId }, { email: googleProfile.email }],
+      });
+    }
+  }
+
+  if (!user) {
+    throw buildHttpError("Unable to create or load user for Google account.", 500);
+  }
+
+  let shouldSave = false;
+  if (!user.googleId) {
+    user.googleId = googleProfile.googleId;
+    shouldSave = true;
+  }
+  if (!user.email) {
+    user.email = googleProfile.email;
+    shouldSave = true;
+  }
+  if (!user.name && googleProfile.name) {
+    user.name = googleProfile.name;
+    shouldSave = true;
+  }
+
+  if (shouldSave) {
+    await user.save();
+  }
+
+  return user;
 }
 
 exports.registerUser = async (req, res) => {
@@ -226,69 +391,28 @@ exports.getGoogleAuthConfig = (_req, res) => {
 
 exports.googleAuthUser = async (req, res) => {
   try {
+    const rawCredential = req.body?.credential || req.body?.idToken;
+    const credential = typeof rawCredential === "string" ? rawCredential.trim() : "";
     const rawAccessToken = req.body?.accessToken;
     const accessToken = typeof rawAccessToken === "string" ? rawAccessToken.trim() : "";
-    const configuredClientId = getGoogleClientId();
+    const configuredClientIds = getGoogleClientIds();
 
-    if (!accessToken) {
-      return res.status(400).json({ error: "Missing required field: `accessToken`." });
+    if (!credential && !accessToken) {
+      return res.status(400).json({
+        error: "Missing required field: `credential` or `accessToken`.",
+      });
     }
 
-    if (!configuredClientId) {
+    if (!configuredClientIds.length) {
       return res.status(500).json({
         error: "Google sign-in is not configured on server. Missing GOOGLE_CLIENT_ID.",
       });
     }
 
-    const tokenInfo = await fetchGoogleTokenInfo(accessToken);
-    const tokenAudience = String(tokenInfo?.aud || "");
-    if (tokenAudience !== configuredClientId) {
-      return res.status(401).json({ error: "Google token audience mismatch." });
-    }
-
-    const googleProfile = await fetchGoogleUserInfo(accessToken);
-    const normalizedEmail = sanitizeIdentifier(googleProfile?.email);
-
-    if (!normalizedEmail) {
-      return res.status(400).json({
-        error: "Google account does not expose a valid email. Please use another account.",
-      });
-    }
-
-    const isEmailVerified = String(googleProfile?.email_verified || "").toLowerCase() === "true";
-    if (!isEmailVerified) {
-      return res.status(401).json({
-        error: "Google email is not verified. Please verify email on Google first.",
-      });
-    }
-
-    let user = await User.findOne({ email: normalizedEmail });
-
-    if (!user) {
-      const randomSecret = crypto.randomBytes(24).toString("hex");
-      const hashedPassword = await bcrypt.hash(randomSecret, 10);
-
-      try {
-        user = await User.create({
-          name: sanitizeName(googleProfile?.name, normalizedEmail.split("@")[0]),
-          email: normalizedEmail,
-          password: hashedPassword,
-        });
-      } catch (createError) {
-        if (createError?.code !== 11000) {
-          throw createError;
-        }
-
-        user = await User.findOne({ email: normalizedEmail });
-      }
-    } else if (!user.name && googleProfile?.name) {
-      user.name = sanitizeName(googleProfile.name, normalizedEmail.split("@")[0]);
-      await user.save();
-    }
-
-    if (!user) {
-      throw buildHttpError("Unable to create or load user for Google account.", 500);
-    }
+    const googleProfile = credential
+      ? await getGoogleProfileFromIdToken(credential, configuredClientIds)
+      : await getGoogleProfileFromAccessToken(accessToken, configuredClientIds);
+    const user = await findOrCreateGoogleUser(googleProfile);
 
     const token = signAuthToken(user._id);
 
